@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,11 +39,25 @@ func main() {
 	app := fiber.New()
 
 	// Connect to the database.
-	dbpool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	log.Println("Attempting to connect to the database...")
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL environment variable is not set")
+	}
+
+	config, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v\n", err)
+		log.Fatalf("Unable to parse database URL: %v\n", err)
+	}
+	config.ConnConfig.ConnectTimeout = 10 * time.Second // Add a 10-second timeout
+
+	dbpool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		log.Fatalf("Unable to create new database pool: %v\n", err)
 	}
 	defer dbpool.Close()
+
+	log.Println("Database connection pool created successfully.")
 
 	// Register handlers.
 	app.Get("/version", func(c *fiber.Ctx) error {
@@ -55,10 +70,16 @@ func main() {
 	})
 
 	app.Get("/db", func(c *fiber.Ctx) error {
-		err := dbpool.Ping(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // Add a 5-second timeout for the ping
+		defer cancel()
+
+		log.Println("Pinging the database...")
+		err := dbpool.Ping(ctx)
 		if err != nil {
+			log.Printf("Database ping failed: %v\n", err)
 			return c.Status(500).SendString("Database ping failed: " + err.Error())
 		}
+		log.Println("Database ping successful.")
 		return c.SendString("Database ping successful!")
 	})
 
