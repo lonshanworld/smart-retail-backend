@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func HandleGetAdminDashboardSummary(c *fiber.Ctx) error {
@@ -66,6 +67,40 @@ func HandleGetAdminDashboardSummary(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": summary})
+}
+
+func HandleCreateUser(c *fiber.Ctx) error {
+	var user models.User
+	if err := c.BodyParser(&user); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to hash password"})
+	}
+	user.Password = string(hashedPassword)
+
+	var query string
+	switch user.Role {
+	case "admin":
+		query = "INSERT INTO admins (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email, role, is_active, created_at, updated_at"
+	case "merchant":
+		query = "INSERT INTO merchants (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email, role, is_active, created_at, updated_at"
+	case "staff":
+		query = "INSERT INTO staff (name, email, password, merchant_id, shop_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, is_active, created_at, updated_at"
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid user role"})
+	}
+
+	var createdUser models.User
+	db := database.GetDB()
+	err = db.QueryRow(query, user.Name, user.Email, user.Password).Scan(&createdUser.ID, &createdUser.Name, &createdUser.Email, &createdUser.Role, &createdUser.IsActive, &createdUser.CreatedAt, &createdUser.UpdatedAt)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Failed to create user: %v", err)})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": createdUser})
 }
 
 func HandleAdminUpdateUser(c *fiber.Ctx) error {
