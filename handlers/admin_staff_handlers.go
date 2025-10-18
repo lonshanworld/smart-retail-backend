@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"app/database"
 	"app/models"
 	"log"
@@ -12,16 +13,16 @@ import (
 // GET /api/v1/admin/staff
 func HandleGetAllStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
+	ctx := context.Background()
 
 	query := `
-        SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.merchant_id, m.name as merchant_name
+        SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.merchant_id
         FROM users u
-        LEFT JOIN merchants m ON u.merchant_id = m.id
         WHERE u.role = 'staff'
         ORDER BY u.created_at DESC
     `
 
-	rows, err := db.Query(query)
+	rows, err := db.Query(ctx, query)
 	if err != nil {
 		log.Printf("Error querying staff users: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -34,8 +35,7 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 	var staffUsers []models.User
 	for rows.Next() {
 		var user models.User
-		// Add MerchantName to the User struct if it doesn't exist
-		if err := rows.Scan(&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive, &user.CreatedAt, &user.MerchantID, &user.MerchantName); err != nil {
+		if err := rows.Scan(&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive, &user.CreatedAt, &user.MerchantID); err != nil {
 			log.Printf("Error scanning staff user row: %v", err)
 			continue // Or handle more gracefully
 		}

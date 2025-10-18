@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"app/database"
 	"log"
 
@@ -16,14 +17,15 @@ type AdminDashboardSummaryModel struct {
 }
 
 // HandleGetAdminDashboardSummary fetches summary data for the admin dashboard.
-func HandleGetAdminDashboardSummaryV2(c *fiber.Ctx) error {
+func HandleGetAdminDashboardSummary(c *fiber.Ctx) error {
 	db := database.GetDB()
+	ctx := context.Background()
 
 	var summary AdminDashboardSummaryModel
 
 	// Query for TotalActiveMerchants
 	queryMerchants := `SELECT COUNT(*) FROM users WHERE role = 'merchant' AND is_active = true`
-	err := db.QueryRow(queryMerchants).Scan(&summary.TotalActiveMerchants)
+	err := db.QueryRow(ctx, queryMerchants).Scan(&summary.TotalActiveMerchants)
 	if err != nil {
 		log.Printf("Error fetching total active merchants: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active merchants count"})
@@ -31,7 +33,7 @@ func HandleGetAdminDashboardSummaryV2(c *fiber.Ctx) error {
 
 	// Query for TotalActiveStaff
 	queryStaff := `SELECT COUNT(*) FROM users WHERE role = 'staff' AND is_active = true`
-	err = db.QueryRow(queryStaff).Scan(&summary.TotalActiveStaff)
+	err = db.QueryRow(ctx, queryStaff).Scan(&summary.TotalActiveStaff)
 	if err != nil {
 		log.Printf("Error fetching total active staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active staff count"})
@@ -39,7 +41,7 @@ func HandleGetAdminDashboardSummaryV2(c *fiber.Ctx) error {
 
 	// Query for TotalActiveShops
 	queryShops := `SELECT COUNT(*) FROM shops WHERE is_active = true`
-	err = db.QueryRow(queryShops).Scan(&summary.TotalActiveShops)
+	err = db.QueryRow(ctx, queryShops).Scan(&summary.TotalActiveShops)
 	if err != nil {
 		log.Printf("Error fetching total active shops: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active shops count"})
@@ -47,7 +49,7 @@ func HandleGetAdminDashboardSummaryV2(c *fiber.Ctx) error {
 
 	// Query for TotalProductsListed
 	queryProducts := `SELECT COUNT(*) FROM inventory_items`
-	err = db.QueryRow(queryProducts).Scan(&summary.TotalProductsListed)
+	err = db.QueryRow(ctx, queryProducts).Scan(&summary.TotalProductsListed)
 	if err != nil {
 		log.Printf("Error fetching total products listed: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch products count"})

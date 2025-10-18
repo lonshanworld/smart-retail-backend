@@ -137,7 +137,7 @@ type ShopCustomer struct {
 	MerchantID string    `json:"merchantId"`
 	Name       string    `json:"name"`
 	Email      *string   `json:"email,omitempty"`
-	Phone      *string   `json:⚫`
+	Phone      *string   `json:"phone,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
@@ -229,13 +229,18 @@ type CreateUserRequest struct {
 
 // CreateShopRequest defines the body for creating a new shop.
 type CreateShopRequest struct {
-	Name string `json:"name"`
+	Name       string  `json:"name"`
+	MerchantID string  `json:"merchantId"`
+	Address    *string `json:"address,omitempty"`
+	Phone      *string `json:"phone,omitempty"`
+	IsActive   bool    `json:"isActive"`
+	IsPrimary  bool    `json:"isPrimary"`
 }
 
 // AdminDashboardSummary holds metrics for the admin dashboard.
 type AdminDashboardSummary struct {
 	TotalMerchants    int     `json:"totalMerchants"`
-	ActiveMerchants   int     `json:⚫`
+	ActiveMerchants   int     `json:"activeMerchants"`
 	TotalStaff        int     `json:"totalStaff"`
 	ActiveStaff       int     `json:"activeStaff"`
 	TotalShops        int     `json:"totalShops"`
@@ -258,6 +263,12 @@ type Pagination struct {
 // PaginatedAdminsResponse is the structure for the GET /api/admin/admins endpoint.
 type PaginatedAdminsResponse struct {
 	Data       []User     `json:"data"`
+	Pagination Pagination `json:"pagination"`
+}
+
+// PaginatedAdminShopsResponse is the structure for the GET /api/admin/shops endpoint.
+type PaginatedAdminShopsResponse struct {
+	Shops      []Shop     `json:"shops"`
 	Pagination Pagination `json:"pagination"`
 }
 

@@ -19,7 +19,7 @@ func main() {
 
 	// Set JWT secret for middleware and handlers
 	middleware.JWTSecret = []byte(cfg.JWTSecret)
-	handlers.JWTSecret = []byte(cfg.JWTSecret)
+	handers.JWTSecret = []byte(cfg.JWTSecret)
 
 	// Connect to the database
 	database.Connect(cfg.DatabaseURL)

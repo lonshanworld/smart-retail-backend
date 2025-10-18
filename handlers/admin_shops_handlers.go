@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"app/database"
 	"app/models"
 	"database/sql"
@@ -18,20 +19,16 @@ import (
 func HandleDeleteShop(c *fiber.Ctx) error {
 	shopID := c.Params("shopId")
 	db := database.GetDB()
+	ctx := context.Background()
 
 	query := "DELETE FROM shops WHERE id = $1"
-	result, err := db.Exec(query, shopID)
+	result, err := db.Exec(ctx, query, shopID)
 	if err != nil {
 		log.Printf("Error deleting shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to delete shop"})
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		log.Printf("Error getting rows affected for shop deletion %s: %v", shopID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to confirm deletion"})
-	}
-
+	rowsAffected := result.RowsAffected()
 	if rowsAffected == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 	}
@@ -45,6 +42,7 @@ func HandleDeleteShop(c *fiber.Ctx) error {
 func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 	shopID := c.Params("shopId")
 	db := database.GetDB()
+	ctx := context.Background()
 
 	var body struct {
 		IsActive bool `json:"is_active"`
@@ -55,18 +53,13 @@ func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 	}
 
 	query := "UPDATE shops SET is_active = $1, updated_at = NOW() WHERE id = $2"
-	result, err := db.Exec(query, body.IsActive, shopID)
+	result, err := db.Exec(ctx, query, body.IsActive, shopID)
 	if err != nil {
 		log.Printf("Error updating shop active status for shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update shop status"})
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		log.Printf("Error getting rows affected for shop status update %s: %v", shopID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to confirm update"})
-	}
-
+	rowsAffected := result.RowsAffected()
 	if rowsAffected == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 	}
@@ -79,6 +72,7 @@ func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 func HandleUpdateShop(c *fiber.Ctx) error {
 	shopID := c.Params("shopId")
 	db := database.GetDB()
+	ctx := context.Background()
 
 	var updates map[string]interface{}
 	if err := c.BodyParser(&updates); err != nil {
@@ -110,7 +104,7 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 	var updatedShop models.Shop
 	var address, phone sql.NullString
 
-	err := db.QueryRow(query, args...).Scan(
+	err := db.QueryRow(ctx, query, args...).Scan(
 		&updatedShop.ID, &updatedShop.Name, &updatedShop.MerchantID, &address, &phone, &updatedShop.IsActive, &updatedShop.IsPrimary, &updatedShop.CreatedAt, &updatedShop.UpdatedAt,
 	)
 
@@ -142,6 +136,7 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	}
 
 	db := database.GetDB()
+	ctx := context.Background()
 	query := `
         INSERT INTO shops (name, merchant_id, address, phone, is_active, is_primary)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -151,7 +146,7 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	var newShop models.Shop
 	var address, phone sql.NullString
 
-	err := db.QueryRow(query, req.Name, req.MerchantID, req.Address, req.Phone, req.IsActive, req.IsPrimary).Scan(
+	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, req.Address, req.Phone, req.IsActive, req.IsPrimary).Scan(
 		&newShop.ID, &newShop.Name, &newShop.MerchantID, &address, &phone, &newShop.IsActive, &newShop.IsPrimary, &newShop.CreatedAt, &newShop.UpdatedAt,
 	)
 
@@ -175,10 +170,11 @@ func HandleCreateShop(c *fiber.Ctx) error {
 // GET /api/v1/admin/shops/:shopId
 func HandleGetShopByID(c *fiber.Ctx) error {
 	db := database.GetDB()
+	ctx := context.Background()
 	shopID := c.Params("shopId")
 
 	query := "SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE id = $1"
-	row := db.QueryRow(query, shopID)
+	row := db.QueryRow(ctx, query, shopID)
 
 	var s models.Shop
 	var address, phone sql.NullString
@@ -205,6 +201,7 @@ func HandleGetShopByID(c *fiber.Ctx) error {
 // GET /api/v1/admin/shops
 func HandleListShops(c *fiber.Ctx) error {
 	db := database.GetDB()
+	ctx := context.Background()
 
 	// --- Pagination Parameters ---
 	page, _ := strconv.Atoi(c.Query("page", "1"))
@@ -246,7 +243,7 @@ func HandleListShops(c *fiber.Ctx) error {
 	// --- Get Total Count ---
 	var totalItems int
 	countQuery := "SELECT COUNT(*) " + baseQuery + whereClause
-	if err := db.QueryRow(countQuery, args...).Scan(&totalItems); err != nil {
+	if err := db.QueryRow(ctx, countQuery, args...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting shops: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count shops"})
 	}
@@ -255,7 +252,7 @@ func HandleListShops(c *fiber.Ctx) error {
 	query := "SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at " + baseQuery + whereClause + fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argId, argId+1)
 	args = append(args, pageSize, offset)
 
-	rows, err := db.Query(query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error querying for shops: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shops"})

@@ -26,12 +26,16 @@ func SetupRoutes(app *fiber.App) {
 	// Dashboard
 	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummaryV2)
 
-	// User Management (including Merchants and other Admins)
+	// User Management (Merchants, Staff, Admins)
+	admin.Get("/users/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /users/:userId
 	admin.Post("/users", handlers.HandleCreateUserV2)
 	admin.Get("/users", handlers.HandleGetUsers)
-	admin.Put("/users/:userId", handlers.HandleAdminUpdateUser) // Corrected handler
-	admin.Put("/users/:userId/status", handlers.HandleSetMerchantUserActiveStatus)
-	admin.Delete("/users/:userId", handlers.HandleDeleteUserMerchant)
+	admin.Get("/users/:userId", handlers.HandleGetUserByID)
+	admin.Put("/users/:userId", handlers.HandleAdminUpdateUser)
+	admin.Put("/users/:userId/status", handlers.HandleSetUserStatus)
+	admin.Delete("/users/:userId", handlers.HandleDeleteUserMerchant) // This is a soft delete
+	admin.Delete("/users/:userId/permanent-delete", handlers.HandlePermanentDeleteUser)
+
 
 	// Specific Admin-related routes
 	admin.Get("/admins", handlers.HandleGetAdmins)
@@ -53,4 +57,19 @@ func SetupRoutes(app *fiber.App) {
 	merchant := api.Group("/merchant", middleware.JWTMiddleware, middleware.MerchantRequired)
 	merchant.Get("/dashboard/summary", handlers.HandleGetMerchantDashboardSummary)
 	merchant.Post("/shops", handlers.HandleCreateShop)
+
+	customers := merchant.Group("/customers")
+	customers.Get("/search", handlers.HandleSearchCustomers)
+	customers.Post("/", handlers.HandleCreateCustomer)
+
+	suppliers := merchant.Group("/suppliers")
+	suppliers.Get("/", handlers.HandleListMerchantSuppliers)
+	suppliers.Get("/:supplierId", handlers.HandleGetSupplierDetails)
+	suppliers.Post("/", handlers.HandleCreateNewSupplier)
+	suppliers.Put("/:supplierId", handlers.HandleUpdateExistingSupplier)
+	suppliers.Delete("/:supplierId", handlers.HandleDeleteExistingSupplier)
+
+	// --- Gemini Routes ---
+	gemini := api.Group("/gemini", middleware.JWTMiddleware)
+	gemini.Post("/generate", handlers.HandleGenerateText)
 }

@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"app/database"
 	"app/models"
 	"fmt"
 	"log"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -15,6 +17,7 @@ import (
 // GET /api/v1/admin/admins
 func HandleGetAdmins(c *fiber.Ctx) error {
 	db := database.GetDB()
+	ctx := context.Background()
 
 	// --- Pagination Parameters ---
 	page, _ := strconv.Atoi(c.Query("page", "1"))
@@ -35,7 +38,7 @@ func HandleGetAdmins(c *fiber.Ctx) error {
 	// --- Get Total Count ---
 	var totalItems int
 	countQuery := "SELECT COUNT(*) " + baseQuery
-	if err := db.QueryRow(countQuery).Scan(&totalItems); err != nil {
+	if err := db.QueryRow(ctx, countQuery).Scan(&totalItems); err != nil {
 		log.Printf("Error counting admin users: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count admin users"})
 	}
@@ -47,7 +50,7 @@ func HandleGetAdmins(c *fiber.Ctx) error {
 	)
 	args = append(args, pageSize, offset)
 
-	rows, err := db.Query(query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error querying for admin users: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve admin users"})

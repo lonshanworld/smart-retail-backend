@@ -27,6 +27,11 @@ func Connect(databaseURL string) {
 	log.Println("Successfully connected to the database")
 }
 
+// GetDB returns the database connection pool.
+func GetDB() *pgxpool.Pool {
+	return DB
+}
+
 // Close closes the database connection pool.
 func Close() {
 	if DB != nil {
