@@ -6,8 +6,8 @@ import (
 	"os"
 
 	"github.com/gofiber/fiber/v2"
+    "github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
-	"google.golang.org/genai"
 )
 
 // HandleGenerateText generates text from a given prompt using the Gemini API.
@@ -37,7 +37,7 @@ func HandleGenerateText(c *fiber.Ctx) error {
 	}
 
 	// Use the Gemini model to generate text
-	model := client.GenerativeModel("gemini-1.5-pro")
+	model := client.GenerativeModel("gemini-1.5-pro-latest")
 	resp, err := model.GenerateContent(ctx, genai.Text(body.Prompt))
 	if err != nil {
 		log.Printf("Error generating content: %v", err)

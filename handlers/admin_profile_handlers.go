@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
@@ -58,7 +59,7 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "No updatable fields provided"})
 	}
 
-	query := fmt.Sprintf("UPDATE users SET %s, updated_at = NOW() WHERE id = $%d AND role = 'admin' RETURNING id, name, email, role, is_active, phone, assigned_shop_id, merchant_id, created_at, updated_at", fmt.Sprintf(",", setParts), argId)
+	query := fmt.Sprintf("UPDATE users SET %s, updated_at = NOW() WHERE id = $%d AND role = 'admin' RETURNING id, name, email, role, is_active, phone, assigned_shop_id, merchant_id, created_at, updated_at", strings.Join(setParts, ", "), argId)
 	args = append(args, userID)
 
 	var updatedUser models.User

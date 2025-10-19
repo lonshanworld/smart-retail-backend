@@ -6,7 +6,6 @@ import (
 
 	"app/config"
 	"app/database"
-	"app/handlers"
 	"app/middleware"
 	"app/routes"
 
@@ -17,9 +16,8 @@ func main() {
 	// Load configuration
 	cfg := config.LoadConfig()
 
-	// Set JWT secret for middleware and handlers
+	// Set JWT secret for middleware
 	middleware.JWTSecret = []byte(cfg.JWTSecret)
-	handers.JWTSecret = []byte(cfg.JWTSecret)
 
 	// Connect to the database
 	database.Connect(cfg.DatabaseURL)

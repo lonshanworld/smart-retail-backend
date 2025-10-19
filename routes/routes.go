@@ -26,7 +26,7 @@ func SetupRoutes(app *fiber.App) {
 	// Dashboard
 	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummary)
 
-	// User Management (Merchants, Staff, Admins)
+	// User Management (Staff, Admins)
 	admin.Get("/users/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /users/:userId
 	admin.Post("/users", handlers.HandleCreateUserV2)
 	admin.Get("/users", handlers.HandleGetUsers)

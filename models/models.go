@@ -63,6 +63,17 @@ type User struct {
 	Shop           *Shop     `json:"Shop,omitempty"`
 }
 
+// Merchant represents a business entity using the service.
+type Merchant struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Email     string    `json:"email"`
+	IsActive  bool      `json:"is_active"`
+    ShopName  *string   `json:"shop_name,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Shop represents a single retail location owned by a merchant.
 type Shop struct {
 	ID         string    `json:"id"`
@@ -289,6 +300,13 @@ type PaginatedAdminShopsResponse struct {
 	Data       []Shop     `json:"data"`
 	Pagination Pagination `json:"pagination"`
 }
+
+// PaginatedAdminMerchantsResponse is the structure for the GET /api/admin/merchants endpoint.
+type PaginatedAdminMerchantsResponse struct {
+	Data       []Merchant `json:"data"`
+	Pagination Pagination `json:"pagination"`
+}
+
 
 // AdminPaginatedUsersResponse is the old structure for paginated users.
 type AdminPaginatedUsersResponse struct {
