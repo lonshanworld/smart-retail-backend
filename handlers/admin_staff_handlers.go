@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"app/database"
 	"app/models"
+	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"

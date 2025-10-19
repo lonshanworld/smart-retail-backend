@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"app/database"
 	"app/models"
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -74,7 +74,7 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 		log.Printf("Error updating admin profile for user %s: %v", userID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update profile"})
 	}
-    
+
 	if phone.Valid {
 		updatedUser.Phone = &phone.String
 	}

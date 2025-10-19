@@ -67,53 +67,53 @@ type User struct {
 type Shop struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
-	MerchantID string    `json:"merchantId"`
+	MerchantID string    `json:"merchant_id"`
 	Address    *string   `json:"address,omitempty"`
 	Phone      *string   `json:"phone,omitempty"`
-	IsActive   bool      `json:"isActive"`
-	IsPrimary  bool      `json:"isPrimary"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	IsActive   bool      `json:"is_active"`
+	IsPrimary  bool      `json:"is_primary"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Supplier provides items to merchants.
 type Supplier struct {
 	ID           string    `json:"id"`
-	MerchantID   string    `json:"merchantId"`
+	MerchantID   string    `json:"merchant_id"`
 	Name         string    `json:"name"`
-	ContactName  *string   `json:"contactName,omitempty"`
-	ContactEmail *string   `json:"contactEmail,omitempty"`
-	ContactPhone *string   `json:"contactPhone,omitempty"`
+	ContactName  *string   `json:"contact_name,omitempty"`
+	ContactEmail *string   `json:"contact_email,omitempty"`
+	ContactPhone *string   `json:"contact_phone,omitempty"`
 	Address      *string   `json:"address,omitempty"`
 	Notes        *string   `json:"notes,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // InventoryItem represents an item in the master inventory of a merchant.
 type InventoryItem struct {
 	ID                string    `json:"id"`
-	MerchantID        string    `json:"merchantId"`
+	MerchantID        string    `json:"merchant_id"`
 	Name              string    `json:"name"`
 	Description       *string   `json:"description,omitempty"`
 	SKU               *string   `json:"sku,omitempty"`
-	SellingPrice      float64   `json:"sellingPrice"`
-	OriginalPrice     *float64  `json:"originalPrice,omitempty"`
-	LowStockThreshold *int      `json:"lowStockThreshold,omitempty"`
+	SellingPrice      float64   `json:"selling_price"`
+	OriginalPrice     *float64  `json:"original_price,omitempty"`
+	LowStockThreshold *int      `json:"low_stock_threshold,omitempty"`
 	Category          *string   `json:"category,omitempty"`
-	SupplierID        *string   `json:"supplierId,omitempty"`
-	IsArchived        bool      `json:"isArchived"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	SupplierID        *string   `json:"supplier_id,omitempty"`
+	IsArchived        bool      `json:"is_archived"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // ShopStock represents the quantity of an inventory item at a specific shop.
 type ShopStock struct {
 	ID              string    `json:"id"`
-	ShopID          string    `json:"shopId"`
-	InventoryItemID string    `json:"inventoryItemId"`
+	ShopID          string    `json:"shop_id"`
+	InventoryItemID string    `json:"inventory_item_id"`
 	Quantity        int       `json:"quantity"`
-	LastStockedInAt time.Time `json:"lastStockedInAt"`
+	LastStockedInAt time.Time `json:"last_stocked_in_at"`
 }
 
 // StockMovement logs any change in stock quantity.
@@ -133,120 +133,138 @@ type StockMovement struct {
 // ShopCustomer represents a customer associated with a specific shop.
 type ShopCustomer struct {
 	ID         string    `json:"id"`
-	ShopID     string    `json:"shopId"`
-	MerchantID string    `json:"merchantId"`
+	ShopID     string    `json:"shop_id"`
+	MerchantID string    `json:"merchant_id"`
 	Name       string    `json:"name"`
 	Email      *string   `json:"email,omitempty"`
 	Phone      *string   `json:"phone,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Promotion represents a discount or offer.
 type Promotion struct {
 	ID          string    `json:"id"`
-	MerchantID  string    `json:"merchantId"`
-	ShopID      *string   `json:"shopId,omitempty"`
+	MerchantID  string    `json:"merchant_id"`
+	ShopID      *string   `json:"shop_id,omitempty"`
 	Name        string    `json:"name"`
 	Description *string   `json:"description,omitempty"`
 	Type        string    `json:"type"`
 	Value       float64   `json:"value"`
-	MinSpend    float64   `json:"minSpend"`
+	MinSpend    float64   `json:"min_spend"`
 	Conditions  JSONB     `json:"conditions,omitempty"`
-	StartDate   time.Time `json:"startDate"`
-	EndDate     time.Time `json:"endDate"`
-	IsActive    bool      `json:"isActive"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	StartDate   time.Time `json:"start_date"`
+	EndDate     time.Time `json:"end_date"`
+	IsActive    bool      `json:"is_active"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Sale represents a single transaction.
 type Sale struct {
-	ID                   string     `json:"id"`
-	ShopID               string     `json:"shopId"`
-	MerchantID           string     `json:"merchantId"`
-	SaleDate             time.Time  `json:"saleDate"`
-	TotalAmount          float64    `json:"totalAmount"`
-	AppliedPromotionID   *string    `json:"appliedPromotionId,omitempty"`
-	DiscountAmount       *float64   `json:"discountAmount,omitempty"`
-	PaymentType          string     `json:"paymentType"`
-	PaymentStatus        string     `json:"paymentStatus"`
-	StripePaymentIntentID *string    `json:"stripePaymentIntentId,omitempty"`
-	Notes                *string    `json:"notes,omitempty"`
-	CreatedAt            time.Time  `json:"createdAt"`
-	UpdatedAt            time.Time  `json:"updatedAt"`
-	Items                []SaleItem `json:"items,omitempty"`
+	ID                    string     `json:"id"`
+	ShopID                string     `json:"shop_id"`
+	MerchantID            string     `json:"merchant_id"`
+	SaleDate              time.Time  `json:"sale_date"`
+	TotalAmount           float64    `json:"total_amount"`
+	AppliedPromotionID    *string    `json:"applied_promotion_id,omitempty"`
+	DiscountAmount        *float64   `json:"discount_amount,omitempty"`
+	PaymentType           string     `json:"payment_type"`
+	PaymentStatus         string     `json:"payment_status"`
+	StripePaymentIntentID *string    `json:"stripe_payment_intent_id,omitempty"`
+	Notes                 *string    `json:"notes,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	Items                 []SaleItem `json:"items,omitempty"`
 }
 
 // SaleItem is an individual item within a Sale.
 type SaleItem struct {
 	ID                  string    `json:"id"`
-	SaleID              string    `json:"saleId"`
-	InventoryItemID     string    `json:"inventoryItemId"`
-	QuantitySold        int       `json:"quantitySold"`
-	SellingPriceAtSale  float64   `json:"sellingPriceAtSale"`
-	OriginalPriceAtSale *float64  `json:"originalPriceAtSale,omitempty"`
+	SaleID              string    `json:"sale_id"`
+	InventoryItemID     string    `json:"inventory_item_id"`
+	QuantitySold        int       `json:"quantity_sold"`
+	SellingPriceAtSale  float64   `json:"selling_price_at_sale"`
+	OriginalPriceAtSale *float64  `json:"original_price_at_sale,omitempty"`
 	Subtotal            float64   `json:"subtotal"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	ItemName            *string   `json:"itemName,omitempty"`
-	ItemSKU             *string   `json:"itemSku,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	ItemName            *string   `json:"item_name,omitempty"`
+	ItemSKU             *string   `json:"item_sku,omitempty"`
 }
 
 // Salary represents a salary payment to a staff member.
 type Salary struct {
-	ID           string    `json:"id"`
-	StaffID      string    `json:"staffId"`
-	Amount       float64   `json:"amount"`
-	PaymentDate  time.Time `json:"paymentDate"`
-	Notes        *string   `json:"notes,omitempty"`
+	ID          string    `json:"id"`
+	StaffID     string    `json:"staff_id"`
+	Amount      float64   `json:"amount"`
+	PaymentDate time.Time `json:"payment_date"`
+	Notes       *string   `json:"notes,omitempty"`
 }
 
 // Notification for a user.
 type Notification struct {
 	ID                string    `json:"id"`
-	RecipientUserID   string    `json:"recipientUserId"`
+	RecipientUserID   string    `json:"recipient_user_id"`
 	Title             string    `json:"title"`
 	Message           string    `json:"message"`
 	Type              string    `json:"type"`
-	RelatedEntityID   *string   `json:"relatedEntityId,omitempty"`
-	RelatedEntityType *string   `json:"relatedEntityType,omitempty"`
-	IsRead            bool      `json:"isRead"`
-	CreatedAt         time.Time `json:"createdAt"`
+	RelatedEntityID   *string   `json:"related_entity_id,omitempty"`
+	RelatedEntityType *string   `json:"related_entity_type,omitempty"`
+	IsRead            bool      `json:"is_read"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
-
 
 // --- API Request/Response Structs ---
 
 // CreateUserRequest defines the body for creating a new user.
 type CreateUserRequest struct {
-	Name       string `json:"name"`
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	Role       string `json:"role"`
-	MerchantID *int   `json:"merchantId,omitempty"`
+	Name       string  `json:"name"`
+	Email      string  `json:"email"`
+	Password   string  `json:"password"`
+	Role       string  `json:"role"`
+	MerchantID *string `json:"merchant_id,omitempty"`
 }
 
 // CreateShopRequest defines the body for creating a new shop.
 type CreateShopRequest struct {
 	Name       string  `json:"name"`
-	MerchantID string  `json:"merchantId"`
+	MerchantID string  `json:"merchant_id"`
 	Address    *string `json:"address,omitempty"`
 	Phone      *string `json:"phone,omitempty"`
-	IsActive   bool    `json:"isActive"`
-	IsPrimary  bool    `json:"isPrimary"`
+	IsActive   bool    `json:"is_active"`
+	IsPrimary  bool    `json:"is_primary"`
 }
 
-// AdminDashboardSummary holds metrics for the admin dashboard.
+// AdminDashboardSummary defines the structure for the admin dashboard summary.
 type AdminDashboardSummary struct {
-	TotalMerchants    int     `json:"totalMerchants"`
-	ActiveMerchants   int     `json:"activeMerchants"`
-	TotalStaff        int     `json:"totalStaff"`
-	ActiveStaff       int     `json:"activeStaff"`
-	TotalShops        int     `json:"totalShops"`
-	TotalSalesValue   float64 `json:"totalSalesValue"`
-	SalesToday        float64 `json:"salesToday"`
-	TransactionsToday int     `json:"transactionsToday"`
+	TotalActiveMerchants int `json:"total_active_merchants"`
+	TotalActiveStaff     int `json:"total_active_staff"`
+	TotalActiveShops     int `json:"total_active_shops"`
+	TotalProductsListed  int `json:"total_products_listed"`
+}
+
+
+// KpiData represents a single Key Performance Indicator.
+type KpiData struct {
+	Value float64 `json:"value"`
+}
+
+// ProductSummary represents a summary of a single product's performance.
+type ProductSummary struct {
+	ProductID   string  `json:"product_id"`
+	ProductName string  `json:"product_name"`
+	QuantitySold int     `json:"quantity_sold"`
+	Revenue     float64 `json:"revenue"`
+}
+
+// MerchantDashboardSummary defines the structure for the merchant dashboard summary.
+type MerchantDashboardSummary struct {
+	TotalSalesRevenue    KpiData          `json:"total_sales_revenue"`
+	NumberOfTransactions KpiData          `json:"number_of_transactions"`
+	AverageOrderValue    KpiData          `json:"average_order_value"`
+	TopSellingProducts   []ProductSummary `json:"top_selling_products"`
 }
 
 
@@ -254,21 +272,21 @@ type AdminDashboardSummary struct {
 
 // Pagination details for paginated responses.
 type Pagination struct {
-	TotalItems  int `json:"totalItems"`
-	TotalPages  int `json:"totalPages"`
-	CurrentPage int `json:"currentPage"`
-    PageSize    int `json:"pageSize"`
+	TotalItems  int `json:"total_items"`
+	TotalPages  int `json:"total_pages"`
+	CurrentPage int `json:"current_page"`
+	PageSize    int `json:"page_size"`
 }
 
-// PaginatedAdminsResponse is the structure for the GET /api/admin/admins endpoint.
-type PaginatedAdminsResponse struct {
+// PaginatedUsersResponse is the generic structure for paginated users.
+type PaginatedUsersResponse struct {
 	Data       []User     `json:"data"`
 	Pagination Pagination `json:"pagination"`
 }
 
 // PaginatedAdminShopsResponse is the structure for the GET /api/admin/shops endpoint.
 type PaginatedAdminShopsResponse struct {
-	Shops      []Shop     `json:"shops"`
+	Data       []Shop     `json:"data"`
 	Pagination Pagination `json:"pagination"`
 }
 
@@ -283,8 +301,10 @@ type AdminPaginatedUsersResponse struct {
 
 // PaginatedSalesResponse for sales history.
 type PaginatedSalesResponse struct {
-	Data       []Sale     `json:"data"`
-	Pagination Pagination `json:"pagination"`
+	Data struct {
+		Items []Sale     `json:"items"`
+		Meta  Pagination `json:"meta"`
+	} `json:"data"`
 }
 
 // PaginatedPromotionsResponse for promotions.
@@ -296,7 +316,7 @@ type PaginatedPromotionsResponse struct {
 // PaginatedSuppliersResponse for suppliers.
 type PaginatedSuppliersResponse struct {
 	Data       []Supplier `json:"data"`
-	Pagination Pagination   `json:"pagination"`
+	Pagination Pagination `json:"pagination"`
 }
 
 // PaginatedInventoryResponse for inventory items.
@@ -308,5 +328,11 @@ type PaginatedInventoryResponse struct {
 // PaginatedNotificationsResponse for notifications.
 type PaginatedNotificationsResponse struct {
 	Data       []Notification `json:"data"`
-	Pagination Pagination       `json:"meta"`
+	Pagination Pagination     `json:"meta"`
+}
+
+// UserSelectionItem for dropdowns
+type UserSelectionItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }

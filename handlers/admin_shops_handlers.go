@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"app/database"
 	"app/models"
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -35,7 +35,6 @@ func HandleDeleteShop(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "success", "message": fmt.Sprintf("Shop %s deleted successfully", shopID)})
 }
-
 
 // HandleSetShopActiveStatus sets the active status of a shop.
 // PUT /api/v1/admin/shops/:shopId/status
@@ -126,7 +125,6 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "success", "data": updatedShop})
 }
 
-
 // HandleCreateShop creates a new shop.
 // POST /api/v1/admin/shops
 func HandleCreateShop(c *fiber.Ctx) error {
@@ -165,7 +163,6 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": newShop})
 }
 
-
 // HandleGetShopByID fetches a single shop by its ID.
 // GET /api/v1/admin/shops/:shopId
 func HandleGetShopByID(c *fiber.Ctx) error {
@@ -195,7 +192,6 @@ func HandleGetShopByID(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "success", "data": s})
 }
-
 
 // HandleListShops fetches a paginated and filtered list of shops for the admin.
 // GET /api/v1/admin/shops
@@ -277,12 +273,12 @@ func HandleListShops(c *fiber.Ctx) error {
 	}
 
 	if err := rows.Err(); err != nil {
-        log.Printf("Error after iterating over shop rows: %v", err)
-        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Error processing shop data"})
-    }
+		log.Printf("Error after iterating over shop rows: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Error processing shop data"})
+	}
 
 	// --- Construct Response ---
-	pagination := models.PaginationInfo{
+	pagination := models.Pagination{
 		TotalItems:  totalItems,
 		TotalPages:  int(math.Ceil(float64(totalItems) / float64(pageSize))),
 		CurrentPage: page,
@@ -290,7 +286,7 @@ func HandleListShops(c *fiber.Ctx) error {
 	}
 
 	response := models.PaginatedAdminShopsResponse{
-		Shops:      shops,
+		Data:       shops,
 		Pagination: pagination,
 	}
 

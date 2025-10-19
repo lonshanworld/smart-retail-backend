@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"app/database"
 	"app/models"
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -21,17 +21,13 @@ func HandleGetAdmins(c *fiber.Ctx) error {
 
 	// --- Pagination Parameters ---
 	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "20")) // Corresponds to 'limit' in frontend
-	pageSize := limit
-	offset := (page - 1) * pageSize
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	offset := (page - 1) * limit
 
-	// --- Sorting Parameters (example, you can expand this) ---
+	// --- Sorting Parameters ---
 	sortBy := c.Query("sortBy", "created_at:desc")
 
 	// --- Build Query ---
-	var args []interface{}
-	argId := 1
-
 	// Base query for admins
 	baseQuery := "FROM users WHERE role = 'admin'"
 
@@ -40,20 +36,22 @@ func HandleGetAdmins(c *fiber.Ctx) error {
 	countQuery := "SELECT COUNT(*) " + baseQuery
 	if err := db.QueryRow(ctx, countQuery).Scan(&totalItems); err != nil {
 		log.Printf("Error counting admin users: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count admin users"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count admin users"})
 	}
 
 	// --- Get Paginated Data ---
 	query := fmt.Sprintf(
-		"SELECT id, name, email, role, is_active, created_at, updated_at FROM users WHERE role = 'admin' ORDER BY %s LIMIT $%d OFFSET $%d",
-		parseSortBy(sortBy), argId, argId+1,
+		"SELECT id, name, email, role, is_active, created_at, updated_at %s ORDER BY %s LIMIT %d OFFSET %d",
+		baseQuery,
+		parseSortBy(sortBy),
+		limit,
+		offset,
 	)
-	args = append(args, pageSize, offset)
 
-	rows, err := db.Query(ctx, query, args...)
+	rows, err := db.Query(ctx, query)
 	if err != nil {
 		log.Printf("Error querying for admin users: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve admin users"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve admin users"})
 	}
 	defer rows.Close()
 
@@ -62,45 +60,47 @@ func HandleGetAdmins(c *fiber.Ctx) error {
 		var u models.User
 		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			log.Printf("Error scanning admin user row: %v", err)
-			continue
+			continue // Skip problematic rows
 		}
 		admins = append(admins, u)
 	}
 
 	if err := rows.Err(); err != nil {
 		log.Printf("Error after iterating over admin user rows: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Error processing admin user data"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error processing admin user data"})
 	}
 
 	// --- Construct Response ---
-	pagination := models.PaginationInfo{
+	pagination := models.Pagination{
 		TotalItems:  totalItems,
-		TotalPages:  int(math.Ceil(float64(totalItems) / float64(pageSize))),
+		TotalPages:  int(math.Ceil(float64(totalItems) / float64(limit))),
 		CurrentPage: page,
-		PageSize:    pageSize,
+		PageSize:    limit,
 	}
 
-	response := models.PaginatedAdminUsersResponse{
+	response := models.PaginatedUsersResponse{
 		Data:       admins,
 		Pagination: pagination,
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": response})
+	return c.JSON(response) // Return the correctly structured response directly
 }
 
 // parseSortBy converts a "field:direction" string into a SQL ORDER BY clause.
-// This is a simplified version and should be expanded for security and more complex cases.
 func parseSortBy(sortBy string) string {
 	parts := strings.Split(sortBy, ":")
 	if len(parts) == 2 {
 		field := parts[0]
 		direction := strings.ToUpper(parts[1])
-		if (direction == "ASC" || direction == "DESC") && (field == "createdAt" || field == "name" || field == "email") {
-			// A real implementation should use a whitelist to prevent SQL injection
-			if field == "createdAt" {
-				field = "created_at" // map frontend name to db column name
-			}
-			return field + " " + direction
+		// Whitelist fields to prevent SQL injection
+		allowedFields := map[string]string{
+			"createdAt": "created_at",
+			"name":      "name",
+			"email":     "email",
+		}
+		dbField, ok := allowedFields[field]
+		if ok && (direction == "ASC" || direction == "DESC") {
+			return dbField + " " + direction
 		}
 	}
 	// Default sort order

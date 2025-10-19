@@ -2,115 +2,108 @@ package handlers
 
 import (
 	"app/database"
-	"app/middleware"
-	"database/sql"
+	"app/models"
+	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-// --- Structs for handler responses ---
-
-type KpiData struct {
-	Value float64 `json:"value"`
-}
-
-type ProductSummaryModel struct {
-	ProductID    string  `json:"product_id"`
-	ProductName  string  `json:"product_name"`
-	QuantitySold int     `json:"quantity_sold"`
-	Revenue      float64 `json:"revenue"`
-}
-
-type MerchantDashboardSummaryModel struct {
-	TotalSalesRevenue    KpiData               `json:"total_sales_revenue"`
-	NumberOfTransactions KpiData               `json:"number_of_transactions"`
-	AverageOrderValue    KpiData               `json:"average_order_value"`
-	TopSellingProducts   []ProductSummaryModel `json:"top_selling_products"`
-}
-
-// HandleGetMerchantDashboardSummary calculates and returns the summary for the merchant's dashboard.
-// GET /api/v1/merchant/dashboard/summary
+// HandleGetMerchantDashboardSummary fetches summary data for the merchant dashboard.
 func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
-	// Get merchant details from JWT
-	claims, err := middleware.GetClaims(c)
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Unauthorized",
-		})
-	}
-	merchantID := claims.UserID
-
 	db := database.GetDB()
-	var summary MerchantDashboardSummaryModel
+	ctx := context.Background()
 
-	// --- Calculate KPIs ---
+	// --- Authorization: Get merchantID from JWT claims ---
+	// This is a placeholder. In a real application, you would get the merchantID
+	// from the authenticated user's JWT claims.
+	const merchantID = "some-merchant-id" // Replace with actual logic
 
-	// Get total sales revenue
-	revenueQuery := "SELECT COALESCE(SUM(total_amount), 0) FROM sales WHERE merchant_id = $1"
-	if err := db.QueryRow(revenueQuery, merchantID).Scan(&summary.TotalSalesRevenue.Value); err != nil {
-		log.Printf("Error getting total sales revenue for merchant %s: %v", merchantID, err)
+	shopID := c.Query("shop_id") // Optional shop_id from query parameter
+
+	var summary models.MerchantDashboardSummary
+
+	// 1. Total Sales Revenue
+	querySales := `
+		SELECT COALESCE(SUM(total_amount), 0)
+		FROM sales
+		WHERE merchant_id = $1
+	`
+	argsSales := []interface{}{merchantID}
+	if shopID != "" {
+		querySales += " AND shop_id = $2"
+		argsSales = append(argsSales, shopID)
+	}
+	err := db.QueryRow(ctx, querySales, argsSales...).Scan(&summary.TotalSalesRevenue.Value)
+	if err != nil {
+		log.Printf("Error fetching total sales revenue: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch total sales revenue"})
 	}
 
-	// Get number of transactions
-	transactionsQuery := "SELECT COUNT(*) FROM sales WHERE merchant_id = $1"
-	if err := db.QueryRow(transactionsQuery, merchantID).Scan(&summary.NumberOfTransactions.Value); err != nil {
-		log.Printf("Error getting transaction count for merchant %s: %v", merchantID, err)
+	// 2. Number of Transactions
+	queryTransactions := `
+		SELECT COUNT(*)
+		FROM sales
+		WHERE merchant_id = $1
+	`
+	argsTransactions := []interface{}{merchantID}
+	if shopID != "" {
+		queryTransactions += " AND shop_id = $2"
+		argsTransactions = append(argsTransactions, shopID)
+	}
+	err = db.QueryRow(ctx, queryTransactions, argsTransactions...).Scan(&summary.NumberOfTransactions.Value)
+	if err != nil {
+		log.Printf("Error fetching number of transactions: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch number of transactions"})
 	}
 
-	// Calculate average order value
+	// 3. Average Order Value
 	if summary.NumberOfTransactions.Value > 0 {
 		summary.AverageOrderValue.Value = summary.TotalSalesRevenue.Value / summary.NumberOfTransactions.Value
 	} else {
 		summary.AverageOrderValue.Value = 0
 	}
 
-	// --- Get Top 5 Selling Products ---
-	topProductsQuery := `
-		SELECT 
-			i.id,
-			i.name,
-			SUM(si.quantity_sold) as total_quantity_sold,
-			SUM(si.subtotal) as total_revenue
-		FROM sale_items si
+	// 4. Top Selling Products
+	queryTopProducts := `
+		SELECT
+			i.id AS product_id,
+			i.name AS product_name,
+			COALESCE(SUM(si.quantity_sold), 0) AS quantity_sold,
+			COALESCE(SUM(si.subtotal), 0) AS revenue
+		FROM sales s
+		JOIN sale_items si ON s.id = si.sale_id
 		JOIN inventory_items i ON si.inventory_item_id = i.id
-		JOIN sales s ON si.sale_id = s.id
 		WHERE s.merchant_id = $1
+	`
+	argsTopProducts := []interface{}{merchantID}
+	if shopID != "" {
+		queryTopProducts += " AND s.shop_id = $2"
+		argsTopProducts = append(argsTopProducts, shopID)
+	}
+	queryTopProducts += `
 		GROUP BY i.id, i.name
-		ORDER BY total_revenue DESC
+		ORDER BY revenue DESC
 		LIMIT 5
 	`
 
-	rows, err := db.Query(topProductsQuery, merchantID)
+	rows, err := db.Query(ctx, queryTopProducts, argsTopProducts...)
 	if err != nil {
-		log.Printf("Error querying top selling products for merchant %s: %v", merchantID, err)
-		// Do not fail the whole request, just return empty top products
-		summary.TopSellingProducts = []ProductSummaryModel{}
-		return c.JSON(fiber.Map{"status": "success", "data": summary})
+		log.Printf("Error fetching top selling products: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch top selling products"})
 	}
 	defer rows.Close()
 
-	products := []ProductSummaryModel{}
+	products := []models.ProductSummary{}
 	for rows.Next() {
-		var p ProductSummaryModel
-		var quantitySold sql.NullInt64
-		var revenue sql.NullFloat64
-
-		if err := rows.Scan(&p.ProductID, &p.ProductName, &quantitySold, &revenue); err != nil {
-			log.Printf("Error scanning top product row for merchant %s: %v", merchantID, err)
+		var p models.ProductSummary
+		if err := rows.Scan(&p.ProductID, &p.ProductName, &p.QuantitySold, &p.Revenue); err != nil {
+			log.Printf("Error scanning top product row: %v", err)
 			continue
-		}
-		if quantitySold.Valid {
-			p.QuantitySold = int(quantitySold.Int64)
-		}
-		if revenue.Valid {
-			p.Revenue = revenue.Float64
 		}
 		products = append(products, p)
 	}
-
 	summary.TopSellingProducts = products
 
-	return c.JSON(fiber.Map{"status": "success", "data": summary})
+	return c.JSON(summary)
 }

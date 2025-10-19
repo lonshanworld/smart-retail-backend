@@ -24,7 +24,7 @@ func SetupRoutes(app *fiber.App) {
 	admin.Put("/profile", handlers.HandleUpdateAdminProfile)
 
 	// Dashboard
-	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummaryV2)
+	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummary)
 
 	// User Management (Merchants, Staff, Admins)
 	admin.Get("/users/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /users/:userId
@@ -36,10 +36,9 @@ func SetupRoutes(app *fiber.App) {
 	admin.Delete("/users/:userId", handlers.HandleDeleteUserMerchant) // This is a soft delete
 	admin.Delete("/users/:userId/permanent-delete", handlers.HandlePermanentDeleteUser)
 
-
 	// Specific Admin-related routes
 	admin.Get("/admins", handlers.HandleGetAdmins)
-    admin.Get("/staff", handlers.HandleGetAllStaff)
+	admin.Get("/staff", handlers.HandleGetAllStaff)
 
 	// Merchant Management (as seen by Admin)
 	admin.Get("/merchants", handlers.HandleListMerchants)
