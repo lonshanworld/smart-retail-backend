@@ -9,6 +9,7 @@
     pkgs.nodejs_20
     pkgs.nodePackages.nodemon
     pkgs.sudo
+    pkgs.postgresql_16
   ];
   # Sets environment variables in the workspace
   env = {};
