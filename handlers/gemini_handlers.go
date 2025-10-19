@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/gofiber/fiber/v2"
+	"google.golang.org/api/option"
 	"google.golang.org/genai"
 )
 
@@ -26,9 +27,7 @@ func HandleGenerateText(c *fiber.Ctx) error {
 
 	// Initialize the Gemini client
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
-	})
+	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 	if err != nil {
 		log.Printf("Error creating Gemini client: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -36,7 +35,6 @@ func HandleGenerateText(c *fiber.Ctx) error {
 			"message": "Failed to initialize Gemini client",
 		})
 	}
-	defer client.Close()
 
 	// Use the Gemini model to generate text
 	model := client.GenerativeModel("gemini-1.5-pro")
