@@ -43,18 +43,29 @@ func SetupRoutes(app *fiber.App) {
 	admin.Get("/merchants", handlers.HandleListMerchants)
 	admin.Get("/merchants/:merchantIdOrUserId", handlers.HandleGetMerchantByID)
 
-	// Shop Management
-	admin.Get("/shops", handlers.HandleListShops)
-	admin.Get("/shops/:shopId", handlers.HandleGetShopByID)
-	admin.Post("/shops", handlers.HandleCreateShop)
-	admin.Put("/shops/:shopId", handlers.HandleUpdateShop)
-	admin.Put("/shops/:shopId/status", handlers.HandleSetShopActiveStatus)
-	admin.Delete("/shops/:shopId", handlers.HandleDeleteShop)
+	// Shop Management (Admin)
+	adminShops := admin.Group("/shops")
+	adminShops.Get("/", handlers.HandleListShops)
+	adminShops.Get("/:shopId", handlers.HandleGetShopByID)
+	adminShops.Post("/", handlers.HandleCreateShop)
+	adminShops.Put("/:shopId", handlers.HandleUpdateShop)
+	adminShops.Put("/:shopId/status", handlers.HandleSetShopActiveStatus)
+	adminShops.Delete("/:shopId", handlers.HandleDeleteShop)
 
 	// --- Merchant Routes ---
 	merchant := api.Group("/merchant", middleware.JWTMiddleware, middleware.MerchantRequired)
 	merchant.Get("/dashboard/summary", handlers.HandleGetMerchantDashboardSummary)
-	merchant.Post("/shops", handlers.HandleCreateShop)
+
+	// Merchant Profile
+	merchant.Get("/profile", handlers.HandleGetMerchantProfile)
+	merchant.Put("/profile", handlers.HandleUpdateMerchantProfile)
+
+	// Merchant Shops
+	merchantShops := merchant.Group("/shops")
+	merchantShops.Get("/", handlers.HandleListMerchantShops)
+	merchantShops.Post("/", handlers.HandleCreateShop) // This was already correct
+	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
+	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
 
 	customers := merchant.Group("/customers")
 	customers.Get("/search", handlers.HandleSearchCustomers)
@@ -66,6 +77,16 @@ func SetupRoutes(app *fiber.App) {
 	suppliers.Post("/", handlers.HandleCreateNewSupplier)
 	suppliers.Put("/:supplierId", handlers.HandleUpdateExistingSupplier)
 	suppliers.Delete("/:supplierId", handlers.HandleDeleteExistingSupplier)
+
+	inventory := merchant.Group("/inventory")
+	inventory.Get("/", handlers.HandleListInventoryItems)
+	inventory.Post("/", handlers.HandleCreateInventoryItem)
+	inventory.Get("/:itemId", handlers.HandleGetInventoryItemByID)
+	inventory.Put("/:itemId", handlers.HandleUpdateInventoryItem)
+	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
+	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
+	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
+
 
 	// --- Gemini Routes ---
 	gemini := api.Group("/gemini", middleware.JWTMiddleware)
