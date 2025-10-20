@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"app/config"
 	"app/database"
 	"app/models"
 
@@ -12,9 +13,6 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// JWTSecret is a temporary secret key. In production, this should be loaded from a secure configuration.
-var JWTSecret = []byte("your-super-secret-key")
 
 // HandleLogin authenticates a user and returns a JWT token.
 func HandleLogin(c *fiber.Ctx) error {
@@ -148,7 +146,7 @@ func createJWT(userID, role string) (string, error) {
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(JWTSecret)
+	return token.SignedString([]byte(config.AppConfig.JWTSecret))
 }
 
 func fetchShop(c *fiber.Ctx, shopID string) (*models.Shop, error) {

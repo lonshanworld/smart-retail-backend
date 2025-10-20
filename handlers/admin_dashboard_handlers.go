@@ -9,43 +9,35 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// HandleGetAdminDashboardSummary fetches summary data for the admin dashboard.
+// HandleGetAdminDashboardSummary handles the GET /api/v1/admin/dashboard/summary endpoint.
 func HandleGetAdminDashboardSummary(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
 	var summary models.AdminDashboardSummary
 
-	// Query for TotalActiveMerchants
-	queryMerchants := `SELECT COUNT(*) FROM users WHERE role = 'merchant' AND is_active = true`
-	err := db.QueryRow(ctx, queryMerchants).Scan(&summary.TotalActiveMerchants)
-	if err != nil {
-		log.Printf("Error fetching total active merchants: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active merchants count"})
+	// Total Active Merchants
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'merchant' AND is_active = true").Scan(&summary.TotalActiveMerchants); err != nil {
+		log.Printf("Error counting active merchants: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active merchants"})
 	}
 
-	// Query for TotalActiveStaff
-	queryStaff := `SELECT COUNT(*) FROM users WHERE role = 'staff' AND is_active = true`
-	err = db.QueryRow(ctx, queryStaff).Scan(&summary.TotalActiveStaff)
-	if err != nil {
-		log.Printf("Error fetching total active staff: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active staff count"})
+	// Total Active Staff
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'staff' AND is_active = true").Scan(&summary.TotalActiveStaff); err != nil {
+		log.Printf("Error counting active staff: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active staff"})
 	}
 
-	// Query for TotalActiveShops
-	queryShops := `SELECT COUNT(*) FROM shops WHERE is_active = true`
-	err = db.QueryRow(ctx, queryShops).Scan(&summary.TotalActiveShops)
-	if err != nil {
-		log.Printf("Error fetching total active shops: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch active shops count"})
+	// Total Active Shops
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shops WHERE is_active = true").Scan(&summary.TotalActiveShops); err != nil {
+		log.Printf("Error counting active shops: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active shops"})
 	}
 
-	// Query for TotalProductsListed
-	queryProducts := `SELECT COUNT(*) FROM inventory_items`
-	err = db.QueryRow(ctx, queryProducts).Scan(&summary.TotalProductsListed)
-	if err != nil {
-		log.Printf("Error fetching total products listed: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch products count"})
+	// Total Products Listed
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_items WHERE is_archived = false").Scan(&summary.TotalProductsListed); err != nil {
+		log.Printf("Error counting products: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count products"})
 	}
 
 	return c.JSON(summary)

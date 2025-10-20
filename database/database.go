@@ -4,38 +4,35 @@ import (
 	"context"
 	"log"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-// DB is a global variable to hold the database connection pool.
-var DB *pgxpool.Pool
+var dbPool *pgxpool.Pool
 
-// Connect sets up the database connection pool.
-func Connect(databaseURL string) {
+// InitDB initializes the database connection pool.
+func InitDB(databaseURL string) {
 	var err error
-	DB, err = pgxpool.New(context.Background(), databaseURL)
+	if databaseURL == "" {
+		log.Fatal("databaseURL is not provided")
+	}
+
+	dbPool, err = pgxpool.Connect(context.Background(), databaseURL)
 	if err != nil {
 		log.Fatalf("Unable to connect to database: %v\n", err)
 	}
 
-	// Optional: Check if the connection is actually working
-	err = DB.Ping(context.Background())
-	if err != nil {
-		log.Fatalf("Database ping failed: %v\n", err)
-	}
-
-	log.Println("Successfully connected to the database")
+	log.Println("Database connection established")
 }
 
 // GetDB returns the database connection pool.
 func GetDB() *pgxpool.Pool {
-	return DB
+	return dbPool
 }
 
-// Close closes the database connection pool.
-func Close() {
-	if DB != nil {
-		DB.Close()
-		log.Println("Database connection pool closed")
+// CloseDB closes the database connection pool.
+func CloseDB() {
+	if dbPool != nil {
+		dbPool.Close()
+		log.Println("Database connection closed")
 	}
 }

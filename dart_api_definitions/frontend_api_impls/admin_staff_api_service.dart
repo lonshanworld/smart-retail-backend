@@ -45,7 +45,7 @@ class AdminStaffApiService extends GetConnect {
   ///   "pagination": { ... }
   /// }
   Future<List<User>> getAllStaff({int page = 1, int limit = 20}) async {
-    if (_app_config.isDevelopment) {
+    if (_appConfig.isDevelopment) {
       return Future.delayed(const Duration(seconds: 1), () => _mockStaff);
     }
     
