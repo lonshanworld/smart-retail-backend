@@ -21,7 +21,7 @@ func SetupRoutes(app *fiber.App) {
 
 	// Admin Profile
 	admin.Get("/profile", handlers.HandleGetAdminProfile)
-	admin.Put("/profile", handlers.HandleUpdateAdminProfile)
+	admin.Put("profile", handlers.HandleUpdateAdminProfile)
 
 	// Dashboard
 	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummary)
@@ -66,6 +66,22 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Post("/", handlers.HandleCreateShop) // This was already correct
 	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
 	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
+
+	// Merchant Staff
+	merchantStaff := merchant.Group("/staff")
+	merchantStaff.Get("/", handlers.HandleListMerchantStaff)
+	merchantStaff.Post("/", handlers.HandleCreateMerchantStaff)
+	merchantStaff.Put("/:staffId", handlers.HandleUpdateMerchantStaff)
+	merchantStaff.Delete("/:staffId", handlers.HandleDeleteMerchantStaff)
+
+	// Merchant Stocks
+	merchant.Get("/stocks", handlers.HandleGetCombinedStocks)
+
+	// Merchant Notifications
+	notifications := merchant.Group("/notifications")
+	notifications.Get("/", handlers.HandleGetNotifications)
+	notifications.Get("/unread-count", handlers.HandleGetUnreadNotificationsCount)
+	notifications.Patch("/:notificationId/read", handlers.HandleMarkNotificationAsRead)
 
 	customers := merchant.Group("/customers")
 	customers.Get("/search", handlers.HandleSearchCustomers)

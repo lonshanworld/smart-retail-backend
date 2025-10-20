@@ -278,6 +278,17 @@ type MerchantDashboardSummary struct {
 	TopSellingProducts   []ProductSummary `json:"top_selling_products"`
 }
 
+// CombinedStockItem represents a flattened view of an inventory item in a specific shop.
+type CombinedStockItem struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	SKU           *string  `json:"sku,omitempty"`
+	Quantity      int      `json:"quantity"`
+	SellingPrice  float64  `json:"sellingPrice"`
+	OriginalPrice *float64 `json:"originalPrice,omitempty"`
+	ShopName      string   `json:"shopName"`
+	ShopID        string   `json:"shopId"`
+}
 
 // --- Paginated Responses ---
 
