@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v4"
-	"google.golang.org/genai"
 	"google.golang.org/api/option"
+	"google.golang.org/genai"
 )
 
 // HandleGetSalesReport generates a sales report based on filters.
@@ -129,26 +130,27 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	model := client.GenerativeModel("gemini-1.5-pro")
 	model.SafetySettings = []*genai.SafetySetting{
 		{
-			Category:    genai.HarmCategoryDangerousContent,
+			Category:  genai.HarmCategoryDangerousContent,
 			Threshold: genai.HarmBlockNone,
 		},
 		{
-			Category:    genai.HarmCategoryHarassment,
+			Category:  genai.HarmCategoryHarassment,
 			Threshold: genai.HarmBlockNone,
 		},
 		{
-			Category:    genai.HarmCategorySexuallyExplicit,
+			Category:  genai.HarmCategorySexuallyExplicit,
 			Threshold: genai.HarmBlockNone,
 		},
 		{
-			Category:    genai.HarmCategoryHateSpeech,
+			Category:  genai.HarmCategoryHateSpeech,
 			Threshold: genai.HarmBlockNone,
 		},
 	}
+
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		log.Printf("Error from Gemini API: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to generate forecast"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to generate forecast from AI"})
 	}
 
 	// 5. Parse the response and format for the frontend
@@ -162,7 +164,6 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 
 // constructForecastPrompt creates a detailed prompt for the Gemini API.
 func constructForecastPrompt(productName, shopName string, currentStock int, data []models.HistoricalSale) string {
-	// Simplified: In a real app, you'd format the data more carefully
 	dataStr := ""
 	for _, d := range data {
 		dataStr += fmt.Sprintf("On %s, %d units were sold.\n", d.SaleDate.Format("2006-01-02"), d.QuantitySold)
@@ -171,47 +172,58 @@ func constructForecastPrompt(productName, shopName string, currentStock int, dat
 		dataStr = "No sales data available for the last 90 days."
 	}
 
-	return fmt.Sprintf(`
-        As a retail data analyst, generate a 7-day sales forecast and analysis.
+	jsonFormat := `{"forecast":[{"date":"YYYY-MM-DD","predicted_sales":integer},...],"summary":"string","positive_factors":["string",...],"negative_factors":["string",...]}`
 
-        **Context:**
-        - Product: %s
-        - Shop: %s
-        - Current Stock: %d units
+	return fmt.Sprintf(`
+        You are an expert retail data analyst. Your task is to generate a 7-day sales forecast and provide a brief analysis based on the data provided.
+
+        **Analysis Context:**
+        - Product Name: %s
+        - Shop Name: %s
+        - Current Stock Level: %d units
         - Today's Date: %s
 
         **Historical Sales Data (last 90 days):**
         %s
 
-        **Your Task:**
-        Provide a JSON object with the following structure. Do not include any introductory text or backticks.
-        - `+"`forecast`"+`: An array of 7 objects, each with `+"`date`"+` (YYYY-MM-DD) and `+"`predicted_sales`"+` (integer).
-        - `+"`summary`"+`: A brief, data-driven summary of the forecast.
-        - `+"`positive_factors`"+`: An array of strings listing factors that could boost sales.
-        - `+"`negative_factors`"+`: An array of strings listing risks or factors that could hurt sales.
+        **Required Output:**
+        You must provide a single, minified JSON object with the following exact structure. Do not include any markdown formatting, backticks, or explanatory text before or after the JSON object.
 
-        **Example JSON Output:**
-        {
-          "forecast": [
-            { "date": "2023-11-25", "predicted_sales": 15 },
-            { "date": "2023-11-26", "predicted_sales": 18 }
-          ],
-          "summary": "Sales are expected to be strong over the weekend.",
-          "positive_factors": ["Upcoming holiday", "Recent marketing campaign"],
-          "negative_factors": ["Potential stock shortages", "Competitor sale"]
-        }
-    `, productName, shopName, currentStock, time.Now().Format("2006-01-02"), dataStr)
+        %s
+    `, productName, shopName, currentStock, time.Now().Format("2006-01-02"), dataStr, jsonFormat)
+}
+
+func extractJSON(rawString string) string {
+	start := strings.Index(rawString, "{")
+	end := strings.LastIndex(rawString, "}")
+	if start == -1 || end == -1 || end < start {
+		return ""
+	}
+	return rawString[start : end+1]
 }
 
 // parseGeminiResponse parses the JSON from Gemini into a structured response.
 func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopName string, currentStock int) (*models.SalesForecastResponse, error) {
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil || len(resp.Candidates[0].Content.Parts) == 0 {
 		return nil, fmt.Errorf("no content received from AI")
 	}
 
-	geminiText, ok := resp.Candidates[0].Content.Parts[0].(genai.Text)
-	if !ok {
-		return nil, fmt.Errorf("unexpected AI response format")
+	var geminiText string
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if txt, ok := part.(genai.Text); ok {
+			geminiText += string(txt)
+		}
+	}
+
+	if geminiText == "" {
+		return nil, fmt.Errorf("no text content received from AI")
+	}
+
+	// Clean the response to get only the JSON object
+	jsonStr := extractJSON(geminiText)
+	if jsonStr == "" {
+		log.Printf("Could not extract JSON from Gemini response: %s", geminiText)
+		return nil, fmt.Errorf("failed to parse AI response format")
 	}
 
 	var geminiJSON struct {
@@ -221,8 +233,8 @@ func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopN
 		NegativeFactors []string             `json:"negative_factors"`
 	}
 
-	if err := json.Unmarshal([]byte(geminiText), &geminiJSON); err != nil {
-		log.Printf("Error parsing Gemini JSON: %v\nRaw Response: %s", err, geminiText)
+	if err := json.Unmarshal([]byte(jsonStr), &geminiJSON); err != nil {
+		log.Printf("Error parsing Gemini JSON: %v\nRaw JSON: %s", err, jsonStr)
 		return nil, fmt.Errorf("failed to parse AI forecast data")
 	}
 

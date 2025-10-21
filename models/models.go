@@ -118,6 +118,13 @@ type InventoryItem struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// InventoryItemWithQuantity extends InventoryItem with shop-specific stock quantity.
+type InventoryItemWithQuantity struct {
+	InventoryItem
+	Quantity int `json:"quantity"`
+}
+
+
 // ShopStock represents the quantity of an inventory item at a specific shop.
 type ShopStock struct {
 	ID              string    `json:"id"`
