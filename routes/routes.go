@@ -66,7 +66,7 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Post("/", handlers.HandleCreateShop) // This was already correct
 	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
 	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
-	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop) // New route
+	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop)
 
 	// Merchant Promotions
 	promotions := merchant.Group("/promotions")
@@ -74,6 +74,11 @@ func SetupRoutes(app *fiber.App) {
 	promotions.Post("/", handlers.HandleCreatePromotion)
 	promotions.Put("/:id", handlers.HandleUpdatePromotion)
 	promotions.Delete("/:id", handlers.HandleDeletePromotion)
+
+	// Merchant Reports
+	reports := merchant.Group("/reports")
+	reports.Get("/sales", handlers.HandleGetSalesReport)
+	reports.Get("/sales-forecast", handlers.HandleGetSalesForecast)
 
 	// Merchant Staff
 	merchantStaff := merchant.Group("/staff")
@@ -119,7 +124,6 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
 	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
 	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
-
 
 	// --- Gemini Routes ---
 	gemini := api.Group("/gemini", middleware.JWTMiddleware)

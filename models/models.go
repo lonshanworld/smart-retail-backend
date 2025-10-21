@@ -160,8 +160,8 @@ type Promotion struct {
 	ShopID      *string   `json:"shop_id,omitempty"`
 	Name        string    `json:"name"`
 	Description *string   `json:"description,omitempty"`
-	Type        string    `json:"type"`
-	Value       float64   `json:"value"`
+	PromoType   string    `json:"promo_type"`
+	PromoValue  float64   `json:"promo_value"`
 	MinSpend    float64   `json:"min_spend"`
 	Conditions  JSONB     `json:"conditions,omitempty"`
 	StartDate   time.Time `json:"start_date"`
