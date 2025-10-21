@@ -66,6 +66,14 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Post("/", handlers.HandleCreateShop) // This was already correct
 	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
 	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
+	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop) // New route
+
+	// Merchant Promotions
+	promotions := merchant.Group("/promotions")
+	promotions.Get("/", handlers.HandleListPromotions)
+	promotions.Post("/", handlers.HandleCreatePromotion)
+	promotions.Put("/:id", handlers.HandleUpdatePromotion)
+	promotions.Delete("/:id", handlers.HandleDeletePromotion)
 
 	// Merchant Staff
 	merchantStaff := merchant.Group("/staff")
@@ -82,6 +90,15 @@ func SetupRoutes(app *fiber.App) {
 	notifications.Get("/", handlers.HandleGetNotifications)
 	notifications.Get("/unread-count", handlers.HandleGetUnreadNotificationsCount)
 	notifications.Patch("/:notificationId/read", handlers.HandleMarkNotificationAsRead)
+
+	// Merchant Payments
+	payments := merchant.Group("/payments")
+	payments.Post("/create-intent", handlers.HandleCreatePaymentIntent)
+
+	// Merchant POS
+	pos := merchant.Group("/pos")
+	pos.Get("/products", handlers.HandleSearchProductsForPOS)
+	pos.Post("/checkout", handlers.HandleCheckout)
 
 	customers := merchant.Group("/customers")
 	customers.Get("/search", handlers.HandleSearchCustomers)

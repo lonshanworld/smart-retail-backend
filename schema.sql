@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'merchant', 'staff')),
     is_active BOOLEAN DEFAULT TRUE,
     merchant_id UUID REFERENCES users(id) ON DELETE SET NULL, -- For staff, points to their merchant
-    assigned_shop_id UUID REFERENCES shops(id) ON DELETE SET NULL, -- For staff, points to their shop
+    assigned_shop_id UUID, -- Forward reference, see ALTER TABLE below
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -30,9 +30,11 @@ CREATE TABLE IF NOT EXISTS shops (
     is_primary BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    -- Ensure a merchant can only have one primary shop
     UNIQUE (merchant_id, is_primary) WHERE is_primary = TRUE
 );
+
+-- Now that shops table exists, add the foreign key constraint to users
+ALTER TABLE users ADD CONSTRAINT fk_assigned_shop_id FOREIGN KEY (assigned_shop_id) REFERENCES shops(id) ON DELETE SET NULL;
 
 -- Suppliers created by merchants
 CREATE TABLE IF NOT EXISTS suppliers (
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
     is_archived BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(merchant_id, sku) -- SKU should be unique per merchant
+    UNIQUE(merchant_id, sku)
 );
 
 -- Stock levels for items in specific shops
@@ -94,31 +96,37 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 CREATE TABLE IF NOT EXISTS shop_customers (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     shop_id UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-    merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- For data ownership context
+    merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255),
     phone VARCHAR(50),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(shop_id, email) -- A customer is unique per shop by email
+    UNIQUE(shop_id, email)
 );
 
 -- Promotions created by merchants
 CREATE TABLE IF NOT EXISTS promotions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    shop_id UUID REFERENCES shops(id) ON DELETE SET NULL, -- Can be shop-specific
+    shop_id UUID REFERENCES shops(id) ON DELETE SET NULL,
     name VARCHAR(255) NOT NULL,
     description TEXT,
-    promo_type VARCHAR(50) NOT NULL, -- 'percentage', 'fixed_amount'
+    promo_type VARCHAR(50) NOT NULL, -- 'percentage', 'fixed_amount', 'bogo'
     promo_value NUMERIC(10, 2) NOT NULL,
     min_spend NUMERIC(10, 2) DEFAULT 0.00,
-    conditions JSONB, -- For complex rules like {"applies_to": "item_id", "ids": ["uuid1", "uuid2"]}
     start_date TIMESTAMP WITH TIME ZONE,
     end_date TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Link table for many-to-many relationship between promotions and products
+CREATE TABLE IF NOT EXISTS promotion_products (
+    promotion_id UUID NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+    inventory_item_id UUID NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+    PRIMARY KEY (promotion_id, inventory_item_id)
 );
 
 -- Sales transactions
@@ -129,7 +137,7 @@ CREATE TABLE IF NOT EXISTS sales (
     staff_id UUID REFERENCES users(id) ON DELETE SET NULL,
     customer_id UUID REFERENCES shop_customers(id) ON DELETE SET NULL,
     sale_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    total_amount NUMERIC(10, 2) NOT NULL, -- This is the final amount after discounts
+    total_amount NUMERIC(10, 2) NOT NULL,
     applied_promotion_id UUID REFERENCES promotions(id) ON DELETE SET NULL,
     discount_amount NUMERIC(10, 2) DEFAULT 0.00,
     payment_type VARCHAR(50) NOT NULL,
@@ -144,12 +152,13 @@ CREATE TABLE IF NOT EXISTS sales (
 CREATE TABLE IF NOT EXISTS sale_items (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
-    inventory_item_id UUID NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT, -- Prevent deleting an item that has been sold
+    inventory_item_id UUID NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT,
     quantity_sold INTEGER NOT NULL,
-    selling_price_at_sale NUMERIC(10, 2) NOT NULL,
+    selling__price_at_sale NUMERIC(10, 2) NOT NULL,
     original_price_at_sale NUMERIC(10, 2),
-    subtotal NUMERIC(10, 2) NOT NULL, -- (selling_price_at_sale * quantity_sold)
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    subtotal NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Salary payments made to staff
