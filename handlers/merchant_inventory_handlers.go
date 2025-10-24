@@ -4,345 +4,310 @@ import (
 	"app/database"
 	"app/models"
 	"context"
-	"database/sql"
-	"fmt"
 	"log"
-	"math"
-	"strings"
+	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v4"
 )
 
-// HandleListInventoryItems handles listing all inventory items for a merchant with pagination and filtering
+// HandleAdjustStock adjusts the stock for a given item in a shop.
+func HandleAdjustStock(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	user := c.Locals("user").(*jwt.Token)
+	claims := user.Claims.(jwt.MapClaims)
+	userID := claims["userId"].(string)
+
+	shopID := c.Params("shopId")
+	itemID := c.Params("itemId")
+
+	var req struct {
+		Quantity int    `json:"quantity"`
+		Reason   string `json:"reason"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+
+	// Update stock quantity
+	var newQuantity int
+	updateQuery := `
+		UPDATE shop_stock 
+		SET quantity = quantity + $1 
+		WHERE shop_id = $2 AND inventory_item_id = $3
+		RETURNING quantity
+	`
+	if err := tx.QueryRow(ctx, updateQuery, req.Quantity, shopID, itemID).Scan(&newQuantity); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to adjust stock"})
+	}
+
+	// Log the movement
+	logQuery := `
+		INSERT INTO stock_movements (shop_id, inventory_item_id, user_id, movement_type, quantity_changed, new_quantity, reason, movement_date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err = tx.Exec(ctx, logQuery, shopID, itemID, userID, "adjustment", req.Quantity, newQuantity, req.Reason, time.Now())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to log stock movement"})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// HandleGetStockMovementHistory retrieves the stock movement history for an item.
+func HandleGetStockMovementHistory(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	shopID := c.Params("shopId")
+	itemID := c.Params("itemId")
+
+	query := `
+		SELECT id, shop_id, inventory_item_id, user_id, movement_type, quantity_changed, new_quantity, reason, notes, movement_date
+		FROM stock_movements 
+		WHERE shop_id = $1 AND inventory_item_id = $2
+		ORDER BY movement_date DESC
+	`
+	rows, err := db.Query(ctx, query, shopID, itemID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve stock movement history"})
+	}
+	defer rows.Close()
+
+	history := make([]models.StockMovement, 0)
+	for rows.Next() {
+		var h models.StockMovement
+		if err := rows.Scan(&h.ID, &h.ShopID, &h.InventoryItemID, &h.UserID, &h.MovementType, &h.QuantityChanged, &h.NewQuantity, &h.Reason, &h.Notes, &h.MovementDate); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to scan history data"})
+		}
+		history = append(history, h)
+	}
+
+	return c.JSON(fiber.Map{"status": "success", "data": history})
+}
+
 func HandleListInventoryItems(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
 	user := c.Locals("user").(*jwt.Token)
 	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	merchantID := claims["userId"].(string)
 
-	// Pagination and filtering parameters
-	page := c.QueryInt("page", 1)
-	pageSize := c.QueryInt("pageSize", 10)
-	nameFilter := c.Query("name")
-
-	offset := (page - 1) * pageSize
-
-	// --- Build Query --- //
-	var queryBuilder, countQueryBuilder strings.Builder
-	args := []interface{}{merchantId}
-	paramIndex := 2
-
-	queryBuilder.WriteString("SELECT id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at FROM merchant_inventory WHERE merchant_id = $1 ")
-	countQueryBuilder.WriteString("SELECT COUNT(*) FROM merchant_inventory WHERE merchant_id = $1 ")
-
-	if nameFilter != "" {
-		queryBuilder.WriteString(fmt.Sprintf("AND name ILIKE $%d ", paramIndex))
-		countQueryBuilder.WriteString(fmt.Sprintf("AND name ILIKE $%d ", paramIndex))
-		args = append(args, "%"+nameFilter+"%")
-		paramIndex++
-	}
-
-	// --- Get Total Count --- //
-	var totalItems int
-	err := db.QueryRow(ctx, countQueryBuilder.String(), args...).Scan(&totalItems)
+	query := `SELECT id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at FROM inventory_items WHERE merchant_id = $1`
+	rows, err := db.Query(ctx, query, merchantID)
 	if err != nil {
-		log.Printf("Error counting inventory items: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
-	}
-
-	// --- Add pagination and get items --- //
-	queryBuilder.WriteString(fmt.Sprintf("ORDER BY created_at DESC LIMIT $%d OFFSET $%d", paramIndex, paramIndex+1))
-	args = append(args, pageSize, offset)
-
-	rows, err := db.Query(ctx, queryBuilder.String(), args...)
-	if err != nil {
-		log.Printf("Error listing inventory items: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve inventory items"})
 	}
 	defer rows.Close()
 
 	items := make([]models.InventoryItem, 0)
 	for rows.Next() {
 		var item models.InventoryItem
-		var description, sku, category, supplierId sql.NullString
-		var lowStockThreshold sql.NullInt32
-
-		err := rows.Scan(&item.ID, &item.MerchantID, &item.Name, &description, &sku, &item.SellingPrice, &item.OriginalPrice, &lowStockThreshold, &category, &supplierId, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt)
-		if err != nil {
-			log.Printf("Error scanning inventory item: %v", err)
-			continue
+		if err := rows.Scan(&item.ID, &item.MerchantID, &item.Name, &item.Description, &item.SKU, &item.SellingPrice, &item.OriginalPrice, &item.LowStockThreshold, &item.Category, &item.SupplierID, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to scan inventory item data"})
 		}
-		if description.Valid {
-			item.Description = &description.String
-		}
-		if sku.Valid {
-			item.SKU = &sku.String
-		}
-		if category.Valid {
-			item.Category = &category.String
-		}
-		if supplierId.Valid {
-			item.SupplierID = &supplierId.String
-		}
-		if lowStockThreshold.Valid {
-			val := int(lowStockThreshold.Int32)
-			item.LowStockThreshold = &val
-		}
-
 		items = append(items, item)
 	}
 
-	// --- Construct Response --- //
-	totalPages := int(math.Ceil(float64(totalItems) / float64(pageSize)))
-
-	return c.JSON(fiber.Map{
-		"status": "success",
-		"data": fiber.Map{
-			"items":       items,
-			"totalItems":  totalItems,
-			"currentPage": page,
-			"pageSize":    pageSize,
-			"totalPages":  totalPages,
-		},
-	})
+	return c.JSON(fiber.Map{"status": "success", "data": items})
 }
 
-
-
-// HandleCreateInventoryItem handles creating a new inventory item
 func HandleCreateInventoryItem(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
 	user := c.Locals("user").(*jwt.Token)
 	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	merchantID := claims["userId"].(string)
 
-	var item models.InventoryItem
-	if err := c.BodyParser(&item); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid JSON"})
+	var req models.InventoryItem
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
-	item.MerchantID = merchantId
-
-	query := `INSERT INTO merchant_inventory (merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at, updated_at`
-
-	err := db.QueryRow(ctx, query, item.MerchantID, item.Name, item.Description, item.SKU, item.SellingPrice, item.OriginalPrice, item.LowStockThreshold, item.Category, item.SupplierID).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
-
+	query := `
+		INSERT INTO inventory_items (merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, created_at, updated_at
+	`
+	err := db.QueryRow(ctx, query, merchantID, req.Name, req.Description, req.SKU, req.SellingPrice, req.OriginalPrice, req.LowStockThreshold, req.Category, req.SupplierID, req.IsArchived).Scan(&req.ID, &req.CreatedAt, &req.UpdatedAt)
 	if err != nil {
-		log.Printf("Error creating inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create inventory item"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": item})
+	return c.JSON(fiber.Map{"status": "success", "data": req})
 }
 
-// HandleGetInventoryItemByID handles getting a single inventory item by ID
 func HandleGetInventoryItemByID(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	itemID := c.Params("itemId")
 
-	itemId := c.Params("itemId")
-
+	query := `SELECT id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at FROM inventory_items WHERE id = $1`
 	var item models.InventoryItem
-	var description, sku, category, supplierId sql.NullString
-	var lowStockThreshold sql.NullInt32
-
-	query := `SELECT id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at FROM merchant_inventory WHERE id = $1 AND merchant_id = $2`
-
-	err := db.QueryRow(ctx, query, itemId, merchantId).Scan(&item.ID, &item.MerchantID, &item.Name, &description, &sku, &item.SellingPrice, &item.OriginalPrice, &lowStockThreshold, &category, &supplierId, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt)
-
+	err := db.QueryRow(ctx, query, itemID).Scan(&item.ID, &item.MerchantID, &item.Name, &item.Description, &item.SKU, &item.SellingPrice, &item.OriginalPrice, &item.LowStockThreshold, &item.Category, &item.SupplierID, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Item not found"})
-		}
-		log.Printf("Error getting inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
-	}
-
-	if description.Valid {
-		item.Description = &description.String
-	}
-	if sku.Valid {
-		item.SKU = &sku.String
-	}
-	if category.Valid {
-		item.Category = &category.String
-	}
-	if supplierId.Valid {
-		item.SupplierID = &supplierId.String
-	}
-	if lowStockThreshold.Valid {
-		val := int(lowStockThreshold.Int32)
-		item.LowStockThreshold = &val
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Inventory item not found"})
 	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": item})
-
 }
 
-// HandleUpdateInventoryItem handles updating an inventory item
 func HandleUpdateInventoryItem(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
-
-	itemId := c.Params("itemId")
-
-	var item models.InventoryItem
-	if err := c.BodyParser(&item); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid JSON"})
+	itemID := c.Params("itemId")
+	var req models.InventoryItem
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
-	query := `UPDATE merchant_inventory SET name = $1, description = $2, sku = $3, selling_price = $4, original_price = $5, low_stock_threshold = $6, category = $7, supplier_id = $8, updated_at = NOW() WHERE id = $9 AND merchant_id = $10 RETURNING id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at`
-
-	var updatedItem models.InventoryItem
-	var description, sku, category, supplierId sql.NullString
-	var lowStockThreshold sql.NullInt32
-
-	err := db.QueryRow(ctx, query, item.Name, item.Description, item.SKU, item.SellingPrice, item.OriginalPrice, item.LowStockThreshold, item.Category, item.SupplierID, itemId, merchantId).Scan(&updatedItem.ID, &updatedItem.MerchantID, &updatedItem.Name, &description, &sku, &updatedItem.SellingPrice, &updatedItem.OriginalPrice, &lowStockThreshold, &category, &supplierId, &updatedItem.IsArchived, &updatedItem.CreatedAt, &updatedItem.UpdatedAt)
-
+	query := `
+		UPDATE inventory_items
+		SET name = $1, description = $2, sku = $3, selling_price = $4, original_price = $5, low_stock_threshold = $6, category = $7, supplier_id = $8, is_archived = $9
+		WHERE id = $10
+		RETURNING updated_at
+	`
+	err := db.QueryRow(ctx, query, req.Name, req.Description, req.SKU, req.SellingPrice, req.OriginalPrice, req.LowStockThreshold, req.Category, req.SupplierID, req.IsArchived, itemID).Scan(&req.UpdatedAt)
 	if err != nil {
-		log.Printf("Error updating inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update inventory item"})
 	}
 
-	if description.Valid {
-		updatedItem.Description = &description.String
-	}
-	if sku.Valid {
-		updatedItem.SKU = &sku.String
-	}
-	if category.Valid {
-		updatedItem.Category = &category.String
-	}
-	if supplierId.Valid {
-		updatedItem.SupplierID = &supplierId.String
-	}
-	if lowStockThreshold.Valid {
-		val := int(lowStockThreshold.Int32)
-		updatedItem.LowStockThreshold = &val
-	}
-
-	return c.JSON(fiber.Map{"status": "success", "data": updatedItem})
+	return c.JSON(fiber.Map{"status": "success", "data": req})
 }
 
-// HandleDeleteInventoryItem handles deleting an inventory item
 func HandleDeleteInventoryItem(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	itemID := c.Params("itemId")
 
-	itemId := c.Params("itemId")
-
-	query := `DELETE FROM merchant_inventory WHERE id = $1 AND merchant_id = $2`
-
-	_, err := db.Exec(ctx, query, itemId, merchantId)
+	query := "DELETE FROM inventory_items WHERE id = $1"
+	_, err := db.Exec(ctx, query, itemID)
 	if err != nil {
-		log.Printf("Error deleting inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to delete inventory item"})
 	}
 
-	return c.JSON(fiber.Map{"status": "success"})
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// HandleArchiveInventoryItem handles archiving an inventory item
 func HandleArchiveInventoryItem(c *fiber.Ctx) error {
-	db := database.GetDB()
-	ctx := context.Background()
-
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
-
-	itemId := c.Params("itemId")
-
-	query := `UPDATE merchant_inventory SET is_archived = TRUE, updated_at = NOW() WHERE id = $1 AND merchant_id = $2 RETURNING id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at`
-
-	var item models.InventoryItem
-	var description, sku, category, supplierId sql.NullString
-	var lowStockThreshold sql.NullInt32
-
-	err := db.QueryRow(ctx, query, itemId, merchantId).Scan(&item.ID, &item.MerchantID, &item.Name, &description, &sku, &item.SellingPrice, &item.OriginalPrice, &lowStockThreshold, &category, &supplierId, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt)
-
-	if err != nil {
-		log.Printf("Error archiving inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
-	}
-
-	if description.Valid {
-		item.Description = &description.String
-	}
-	if sku.Valid {
-		item.SKU = &sku.String
-	}
-	if category.Valid {
-		item.Category = &category.String
-	}
-	if supplierId.Valid {
-		item.SupplierID = &supplierId.String
-	}
-	if lowStockThreshold.Valid {
-		val := int(lowStockThreshold.Int32)
-		item.LowStockThreshold = &val
-	}
-
-	return c.JSON(fiber.Map{"status": "success", "data": item})
+	return handleArchiveStatus(c, true)
 }
 
-// HandleUnarchiveInventoryItem handles unarchiving an inventory item
 func HandleUnarchiveInventoryItem(c *fiber.Ctx) error {
+	return handleArchiveStatus(c, false)
+}
+
+func handleArchiveStatus(c *fiber.Ctx, isArchived bool) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	itemID := c.Params("itemId")
 
-	itemId := c.Params("itemId")
-
-	query := `UPDATE merchant_inventory SET is_archived = FALSE, updated_at = NOW() WHERE id = $1 AND merchant_id = $2 RETURNING id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at`
-
-	var item models.InventoryItem
-	var description, sku, category, supplierId sql.NullString
-	var lowStockThreshold sql.NullInt32
-
-	err := db.QueryRow(ctx, query, itemId, merchantId).Scan(&item.ID, &item.MerchantID, &item.Name, &description, &sku, &item.SellingPrice, &item.OriginalPrice, &lowStockThreshold, &category, &supplierId, &item.IsArchived, &item.CreatedAt, &item.UpdatedAt)
-
+	query := "UPDATE inventory_items SET is_archived = $1 WHERE id = $2"
+	_, err := db.Exec(ctx, query, isArchived, itemID)
 	if err != nil {
-		log.Printf("Error unarchiving inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update archive status"})
 	}
 
-	if description.Valid {
-		item.Description = &description.String
-	}
-	if sku.Valid {
-		item.SKU = &sku.String
-	}
-	if category.Valid {
-		item.Category = &category.String
-	}
-	if supplierId.Valid {
-		item.SupplierID = &supplierId.String
-	}
-	if lowStockThreshold.Valid {
-		val := int(lowStockThreshold.Int32)
-		item.LowStockThreshold = &val
-	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
 
-	return c.JSON(fiber.Map{"status": "success", "data": item})
+func HandleListInventoryForShop(c *fiber.Ctx) error {
+    db := database.GetDB()
+    ctx := context.Background()
+    shopID := c.Params("shopId")
+
+    // Parse query parameters for pagination
+    page, _ := strconv.Atoi(c.Query("page", "1"))
+    pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+    offset := (page - 1) * pageSize
+
+    // Query to get paginated inventory items
+    query := `
+        SELECT 
+            i.id, i.name, i.sku, i.selling_price, 
+            s.quantity, s.last_stocked_in_at
+        FROM inventory_items i
+        JOIN shop_stock s ON i.id = s.inventory_item_id
+        WHERE s.shop_id = $1
+        LIMIT $2 OFFSET $3
+    `
+
+    rows, err := db.Query(ctx, query, shopID, pageSize, offset)
+    if err != nil {
+        log.Printf("Error querying shop inventory: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "status":  "error",
+            "message": "Failed to retrieve shop inventory",
+        })
+    }
+    defer rows.Close()
+
+    var items []models.ShopStockItem
+    for rows.Next() {
+        var item models.ShopStockItem
+        if err := rows.Scan(&item.ID, &item.ItemName, &item.ItemSku, &item.ItemUnitPrice, &item.Quantity, &item.LastStockedInAt); err != nil {
+            log.Printf("Error scanning shop inventory item: %v", err)
+            return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+                "status":  "error",
+                "message": "Error processing shop inventory data",
+            })
+        }
+        items = append(items, item)
+    }
+
+    // Query to get the total count of items for pagination metadata
+    countQuery := "SELECT COUNT(*) FROM shop_stock WHERE shop_id = $1"
+    var totalItems int
+    if err := db.QueryRow(ctx, countQuery, shopID).Scan(&totalItems); err != nil {
+        log.Printf("Error counting shop inventory: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "status":  "error",
+            "message": "Failed to count shop inventory",
+        })
+    }
+
+    totalPages := (totalItems + pageSize - 1) / pageSize
+
+    return c.JSON(models.PaginatedShopStockResponse{
+        Items:      items,
+        TotalItems:  totalItems,
+        CurrentPage: page,
+        PageSize:    pageSize,
+        TotalPages:  totalPages,
+    })
+}
+
+
+func HandleAdjustStockItem(c *fiber.Ctx) error {
+    return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+        "status":  "error",
+        "message": "Endpoint not implemented yet",
+    })
+}
+
+func HandleStockInItem(c *fiber.Ctx) error {
+    return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+        "status":  "error",
+        "message": "Endpoint not implemented yet",
+    })
 }

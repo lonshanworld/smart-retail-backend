@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS sale_items (
     sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
     inventory_item_id UUID NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT,
     quantity_sold INTEGER NOT NULL,
-    selling__price_at_sale NUMERIC(10, 2) NOT NULL,
+    selling_price_at_sale NUMERIC(10, 2) NOT NULL,
     original_price_at_sale NUMERIC(10, 2),
     subtotal NUMERIC(10, 2) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

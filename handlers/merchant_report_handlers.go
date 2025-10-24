@@ -13,8 +13,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
-	"google.golang.org/genai"
 )
 
 // HandleGetSalesReport generates a sales report based on filters.

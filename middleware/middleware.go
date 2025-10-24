@@ -38,6 +38,7 @@ func JWTMiddleware(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"message": "Invalid or expired JWT"})
 	}
 
+	c.Locals("user", token)
 	c.Locals("userID", claims.UserID)
 	c.Locals("userRole", claims.Role)
 
@@ -58,6 +59,15 @@ func MerchantRequired(c *fiber.Ctx) error {
 	role, ok := c.Locals("userRole").(string)
 	if !ok || role != "merchant" {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"message": "Merchant access required"})
+	}
+	return c.Next()
+}
+
+// StaffRequired is a middleware function that checks if the user has a 'staff' role.
+func StaffRequired(c *fiber.Ctx) error {
+	role, ok := c.Locals("userRole").(string)
+	if !ok || role != "staff" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"message": "Staff access required"})
 	}
 	return c.Next()
 }

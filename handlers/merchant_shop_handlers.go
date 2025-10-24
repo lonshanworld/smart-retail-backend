@@ -137,3 +137,49 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "success", "data": products})
 }
+
+// HandleSetPrimaryShop sets a shop as the primary shop for the merchant.
+func HandleSetPrimaryShop(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	user := c.Locals("user").(*jwt.Token)
+	claims := user.Claims.(jwt.MapClaims)
+	merchantID := claims["userId"].(string)
+
+	shopID := c.Params("shopId")
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+
+	// Reset all other shops for this merchant to not be primary
+	resetQuery := "UPDATE shops SET is_primary = FALSE WHERE merchant_id = $1"
+	if _, err := tx.Exec(ctx, resetQuery, merchantID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to reset primary shops"})
+	}
+
+	// Set the specified shop as primary
+	setQuery := `
+        UPDATE shops 
+        SET is_primary = TRUE 
+        WHERE id = $1 AND merchant_id = $2
+        RETURNING id, name, address, phone, is_active, is_primary, created_at, updated_at
+    `
+	var shop models.Shop
+	err = tx.QueryRow(ctx, setQuery, shopID, merchantID).Scan(
+		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+	)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to set primary shop"})
+	}
+	shop.MerchantID = merchantID
+
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
+
+	return c.JSON(fiber.Map{"status": "success", "data": shop})
+}

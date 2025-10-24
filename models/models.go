@@ -69,7 +69,7 @@ type Merchant struct {
 	Name      string    `json:"name"`
 	Email     string    `json:"email"`
 	IsActive  bool      `json:"is_active"`
-    ShopName  *string   `json:"shop_name,omitempty"`
+	ShopName  *string   `json:"shop_name,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -183,6 +183,8 @@ type Sale struct {
 	ID                    string     `json:"id"`
 	ShopID                string     `json:"shop_id"`
 	MerchantID            string     `json:"merchant_id"`
+	StaffID               *string    `json:"staff_id,omitempty"`
+	CustomerID            *string    `json:"customer_id,omitempty"`
 	SaleDate              time.Time  `json:"sale_date"`
 	TotalAmount           float64    `json:"total_amount"`
 	AppliedPromotionID    *string    `json:"applied_promotion_id,omitempty"`
@@ -337,10 +339,8 @@ type AdminPaginatedUsersResponse struct {
 
 // PaginatedSalesResponse for sales history.
 type PaginatedSalesResponse struct {
-	Data struct {
-		Items []Sale     `json:"items"`
-		Meta  Pagination `json:"meta"`
-	} `json:"data"`
+	Items      []Sale     `json:"items"`
+	Pagination Pagination `json:"pagination"`
 }
 
 // PaginatedPromotionsResponse for promotions.
@@ -371,4 +371,69 @@ type PaginatedNotificationsResponse struct {
 type UserSelectionItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type PaginatedShopStockResponse struct {
+	Items      []ShopStockItem `json:"items"`
+	TotalItems  int             `json:"total_items"`
+	CurrentPage int             `json:"current_page"`
+	PageSize    int             `json:"page_size"`
+	TotalPages  int             `json:"total_pages"`
+}
+
+type ShopStockItem struct {
+	ID              string    `json:"id"`
+	ShopID          string    `json:"shop_id"`
+	InventoryItemID string    `json:"inventory_item_id"`
+	ItemName        string    `json:"item_name"`
+	ItemSku         string    `json:"item_sku"`
+	ItemUnitPrice   float64   `json:"item_unit_price"`
+	Quantity        int       `json:"quantity"`
+	LastStockedInAt time.Time `json:"last_stocked_in_at"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+
+
+type Receipt struct {
+	SaleID         string        `json:"sale_id"`
+	SaleDate       time.Time     `json:"sale_date"`
+	ShopName       string        `json:"shop_name"`
+	ShopAddress    string        `json:"shop_address"`
+	MerchantName   string        `json:"merchant_name"`
+	OriginalTotal  float64       `json:"original_total"`
+	DiscountAmount float64       `json:"discount_amount"`
+	FinalTotal     float64       `json:"final_total"`
+	PaymentType    string        `json:"payment_type"`
+	PaymentStatus  string        `json:"payment_status"`
+	Items          []ReceiptItem `json:"items"`
+}
+
+
+type ShopDashboardSummary struct {
+	SalesToday        float64 `json:"salesToday"`
+	TransactionsToday int     `json:"transactionsToday"`
+	LowStockItems     int     `json:"lowStockItems"`
+}
+
+type ReceiptItem struct {
+	ItemName  string  `json:"item_name"`
+	Quantity  int     `json:"quantity"`
+	UnitPrice float64 `json:"unit_price"`
+	Total     float64 `json:"total"`
+}
+
+type StaffDashboardSummaryResponse struct {
+	AssignedShopName  string                `json:"assigned_shop_name"`
+	SalesToday        float64               `json:"sales_today"`
+	TransactionsToday int                   `json:"transactions_today"`
+	RecentActivities  []StaffRecentActivity `json:"recent_activities"`
+}
+
+type StaffRecentActivity struct {
+	Type      string    `json:"type"`
+	Timestamp time.Time `json:"timestamp"`
+	Details   string    `json:"details"`
+	RelatedID string    `json:"related_id"`
 }

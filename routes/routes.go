@@ -56,6 +56,9 @@ func SetupRoutes(app *fiber.App) {
 	merchant := api.Group("/merchant", middleware.JWTMiddleware, middleware.MerchantRequired)
 	merchant.Get("/dashboard/summary", handlers.HandleGetMerchantDashboardSummary)
 
+	// AI Assistant
+	merchant.Post("/ai-analysis", handlers.HandleAIAssistant)
+
 	// Merchant Profile
 	merchant.Get("/profile", handlers.HandleGetMerchantProfile)
 	merchant.Put("/profile", handlers.HandleUpdateMerchantProfile)
@@ -67,6 +70,23 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
 	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
 	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop)
+	merchantShops.Patch("/:shopId/set-primary", handlers.HandleSetPrimaryShop)
+	merchantShops.Get("/:shopId/inventory", handlers.HandleListInventoryForShop)
+	merchantShops.Post("/:shopId/inventory/:inventoryItemId/stock-in", handlers.HandleStockInItem)
+	merchantShops.Patch("/:shopId/inventory/:inventoryItemId/adjust-stock", handlers.HandleAdjustStockItem)
+	merchantShops.Get("/:shopId/sales", handlers.HandleListSalesForShop)
+
+    // New routes for stock adjustment and history
+    merchantShops.Post("/:shopId/inventory/:itemId/adjust", handlers.HandleAdjustStock)
+    merchantShops.Get("/:shopId/inventory/:itemId/history", handlers.HandleGetStockMovementHistory)
+
+
+	// Merchant Sales
+	merchantSales := merchant.Group("/sales")
+	merchantSales.Post("/", handlers.HandleCreateSale)
+	merchantSales.Get("/:saleId", handlers.HandleGetSaleByID)
+	merchantSales.Get("/:saleId/receipt", handlers.HandleGetReceipt)
+
 
 	// Merchant Promotions
 	promotions := merchant.Group("/promotions")
@@ -124,6 +144,14 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
 	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
 	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
+
+	// --- Staff Routes ---
+	staff := api.Group("/staff", middleware.JWTMiddleware, middleware.StaffRequired)
+	staff.Get("/dashboard/summary", handlers.HandleGetStaffDashboardSummary)
+
+	// --- Shop Routes ---
+	shop := api.Group("/shop", middleware.JWTMiddleware, middleware.StaffRequired)
+	shop.Get("/dashboard/summary", handlers.HandleGetShopDashboardSummary)
 
 	// --- Gemini Routes ---
 	gemini := api.Group("/gemini", middleware.JWTMiddleware)
