@@ -61,6 +61,11 @@ type User struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	Shop           *Shop     `json:"Shop,omitempty"`
+
+	// Fields for staff profile
+	ShopName     *string  `json:"shopName,omitempty"`
+	Salary       *float64 `json:"salary,omitempty"`
+	PayFrequency *string  `json:"payFrequency,omitempty"`
 }
 
 // Merchant represents a business entity using the service.
@@ -485,4 +490,18 @@ type StockInItem struct {
 // StockInRequest is the request body for the stock-in endpoint.
 type StockInRequest struct {
 	Items []StockInItem `json:"items"`
+}
+
+// StaffCheckoutItem represents a single item in a staff checkout request.
+type StaffCheckoutItem struct {
+	ProductID          string  `json:"productId"`
+	Quantity           int     `json:"quantity"`
+	SellingPriceAtSale float64 `json:"sellingPriceAtSale"`
+}
+
+// StaffCheckoutRequest is the request body for the staff checkout endpoint.
+type StaffCheckoutRequest struct {
+	Items       []StaffCheckoutItem `json:"items"`
+	TotalAmount float64             `json:"totalAmount"`
+	PaymentType string              `json:"paymentType"`
 }

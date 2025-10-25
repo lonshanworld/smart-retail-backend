@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS shops (
 -- Now that shops table exists, add the foreign key constraint to users
 ALTER TABLE users ADD CONSTRAINT fk_assigned_shop_id FOREIGN KEY (assigned_shop_id) REFERENCES shops(id) ON DELETE SET NULL;
 
+-- Staff contracts table
+CREATE TABLE IF NOT EXISTS staff_contracts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    staff_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    salary NUMERIC(10, 2) NOT NULL,
+    pay_frequency VARCHAR(50) NOT NULL, -- 'monthly', 'bi-weekly', etc.
+    start_date DATE NOT NULL,
+    end_date DATE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Suppliers created by merchants
 CREATE TABLE IF NOT EXISTS suppliers (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

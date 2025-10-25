@@ -27,13 +27,13 @@ func SetupRoutes(app *fiber.App) {
 	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummary)
 
 	// User Management (Staff, Admins)
-	admin.Get("/users/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /users/:userId
-	admin.Post("/users", handlers.HandleCreateUser)
-	admin.Get("/users", handlers.HandleListUsers)
-	admin.Get("/:userId", handlers.HandleGetUserByID)
-	admin.Put("/:userId", handlers.HandleUpdateUser)
-	admin.Put("/:userId/status", handlers.HandleSetUserStatus)
-	admin.Delete("/:userId/permanent-delete", handlers.HandleHardDeleteUser)
+	adminUsers := admin.Group("/users")
+	adminUsers.Get("/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /:userId
+	adminUsers.Post("/", handlers.HandleCreateUser)
+	adminUsers.Get("/", handlers.HandleListUsers)
+	adminUsers.Get("/:userId", handlers.HandleGetUserByID)
+	adminUsers.Put("/:userId", handlers.HandleUpdateUser)
+	adminUsers.Delete("/:userId", handlers.HandleHardDeleteUser) // Corrected path
 
 	// Specific Admin-related routes
 	admin.Get("/admins", handlers.HandleGetAdmins)
@@ -72,6 +72,7 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop)
 	merchantShops.Patch("/:shopId/set-primary", handlers.HandleSetPrimaryShop)
 	merchantShops.Get("/:shopId/inventory", handlers.HandleListInventoryForShop)
+	merchantShops.Post("/:shopId/stock-in", handlers.HandleShopStockIn)
 	merchantShops.Post("/:shopId/inventory/:inventoryItemId/stock-in", handlers.HandleStockInItem)
 	merchantShops.Patch("/:shopId/inventory/:inventoryItemId/adjust-stock", handlers.HandleAdjustStockItem)
 	merchantShops.Get("/:shopId/sales", handlers.HandleListSalesForShop)
@@ -131,14 +132,15 @@ func SetupRoutes(app *fiber.App) {
 
 	suppliers := merchant.Group("/suppliers")
 	suppliers.Get("/", handlers.HandleListMerchantSuppliers)
-	suppliers.Get("/:supplierId", handlers.HandleGetSupplierDetails)
 	suppliers.Post("/", handlers.HandleCreateNewSupplier)
+	suppliers.Get("/:supplierId", handlers.HandleGetSupplierDetails)
 	suppliers.Put("/:supplierId", handlers.HandleUpdateExistingSupplier)
 	suppliers.Delete("/:supplierId", handlers.HandleDeleteExistingSupplier)
 
 	inventory := merchant.Group("/inventory")
 	inventory.Get("/", handlers.HandleListInventoryItems)
 	inventory.Post("/", handlers.HandleCreateInventoryItem)
+	inventory.Post("/stock-in", handlers.HandleMerchantStockIn)
 	inventory.Get("/:itemId", handlers.HandleGetInventoryItemByID)
 	inventory.Put("/:itemId", handlers.HandleUpdateInventoryItem)
 	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
@@ -152,11 +154,16 @@ func SetupRoutes(app *fiber.App) {
 	staff.Get("/profile", handlers.HandleGetStaffProfile)
 	staff.Get("/salary", handlers.HandleGetSalaryHistory)
 
+	// --- Staff POS Routes ---
+	staffPOS := staff.Group("/pos")
+	staffPOS.Get("/products", handlers.HandleSearchProductsForStaff)
+	staffPOS.Post("/checkout", handlers.HandleStaffCheckout)
+
 
 	// --- Shop Routes ---
 	shop := api.Group("/shop", middleware.JWTMiddleware, middleware.StaffRequired)
 	shop.Get("/dashboard/summary", handlers.HandleGetShopDashboardSummary)
-	shop.Get("/profile", handlers.HandleGetShopProfile)
+	shop.Get("/profile", handlers.HandleGetShopProfile) // Corrected route
 
 	// New routes for shop inventory management
 	shop.Get("/items", handlers.HandleGetShopItems)
@@ -166,8 +173,8 @@ func SetupRoutes(app *fiber.App) {
 
 	// --- Shop POS Routes ---
 	shopPOS := shop.Group("/pos")
-	shopPOS.Get("/products", handlers.HandleSearchShopProducts)
-	shopPOS.Post("/checkout", handlers.HandleShopCheckout)
+	shopPOS.Get("/:shopId/products", handlers.HandleSearchShopProducts)
+	shopPOS.Post("/:shopId/checkout", handlers.HandleShopCheckout)
 
 	// --- Gemini Routes ---
 	gemini := api.Group("/gemini", middleware.JWTMiddleware)

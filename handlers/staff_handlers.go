@@ -72,10 +72,18 @@ func HandleGetStaffProfile(c *fiber.Ctx) error {
 	userID := claims["userId"].(string)
 
 	var user models.User
-	userQuery := `SELECT id, name, email, role, is_active, phone, assigned_shop_id, merchant_id, created_at, updated_at FROM users WHERE id = $1`
-	err := db.QueryRow(ctx, userQuery, userID).Scan(
-		&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive, &user.Phone, &user.AssignedShopID, &user.MerchantID, &user.CreatedAt, &user.UpdatedAt,
+	query := `
+        SELECT
+            u.id, u.name, u.email, u.role, s.name as shop_name, sc.salary, sc.pay_frequency
+        FROM users u
+        LEFT JOIN shops s ON u.assigned_shop_id = s.id
+        LEFT JOIN staff_contracts sc ON u.id = sc.staff_id
+        WHERE u.id = $1
+    `
+	err := db.QueryRow(ctx, query, userID).Scan(
+		&user.ID, &user.Name, &user.Email, &user.Role, &user.ShopName, &user.Salary, &user.PayFrequency,
 	)
+
 	if err != nil {
 		log.Printf("Error fetching staff profile for user %s: %v", userID, err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Staff profile not found"})
