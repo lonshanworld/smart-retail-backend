@@ -86,7 +86,7 @@ func HandleGetShopItems(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.JSON(items)
+	return c.JSON(fiber.Map{"status": "success", "data": items})
 }
 
 type UpdateStockRequest struct {
