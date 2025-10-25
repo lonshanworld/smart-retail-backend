@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetMerchantDashboardSummary fetches summary data for the merchant dashboard.
@@ -15,9 +16,9 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	// --- Authorization: Get merchantID from JWT claims ---
-	// This is a placeholder. In a real application, you would get the merchantID
-	// from the authenticated user's JWT claims.
-	const merchantID = "some-merchant-id" // Replace with actual logic
+	user := c.Locals("user").(*jwt.Token)
+	claims := user.Claims.(jwt.MapClaims)
+	merchantID := claims["userId"].(string)
 
 	shopID := c.Query("shop_id") // Optional shop_id from query parameter
 

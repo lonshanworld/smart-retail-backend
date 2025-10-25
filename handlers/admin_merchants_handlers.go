@@ -66,7 +66,7 @@ func HandleListMerchants(c *fiber.Ctx) error {
 	}
 
 	// --- Count Query ---
-	countQuery := "SELECT COUNT(DISTINCT u.id) FROM users u LEFT JOIN shops s ON u.id = s.merchant_id " + whereClause
+	countQuery := "SELECT COUNT(DISTINCT u.id) FROM users u " + whereClause
 	var totalItems int
 	if err := db.QueryRow(ctx, countQuery, args...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting merchants: %v", err)
@@ -78,7 +78,7 @@ func HandleListMerchants(c *fiber.Ctx) error {
 	query := fmt.Sprintf(`
         SELECT u.id, u.name, u.email, u.is_active, s.name as shop_name, u.created_at, u.updated_at
         FROM users u
-        LEFT JOIN shops s ON u.id = s.merchant_id
+        LEFT JOIN shops s ON u.id = s.merchant_id AND s.is_primary = true
         %s
         ORDER BY u.created_at DESC
         LIMIT $%d OFFSET $%d
@@ -130,7 +130,7 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
 	query := `
         SELECT u.id, u.name, u.email, u.is_active, s.name as shop_name, u.created_at, u.updated_at
         FROM users u
-        LEFT JOIN shops s ON u.id = s.merchant_id
+        LEFT JOIN shops s ON u.id = s.merchant_id AND s.is_primary = true
         WHERE u.id = $1 AND u.role = 'merchant'
     `
 

@@ -4,6 +4,7 @@ import (
 	"app/database"
 	"app/models"
 	"context"
+    "database/sql"
 	"log"
 	"strconv"
 	"time"
@@ -33,6 +34,18 @@ func HandleAdjustStock(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
+    // Validation check
+    var exists bool
+    checkQuery := "SELECT EXISTS(SELECT 1 FROM shop_stock WHERE shop_id = $1 AND inventory_item_id = $2)"
+    err := db.QueryRow(ctx, checkQuery, shopID, itemID).Scan(&exists)
+    if err != nil {
+        log.Printf("Error checking shop_stock link: %v", err)
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error during validation"})
+    }
+    if !exists {
+        return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Item not found in this shop's stock"})
+    }
+
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
@@ -48,6 +61,9 @@ func HandleAdjustStock(c *fiber.Ctx) error {
 		RETURNING quantity
 	`
 	if err := tx.QueryRow(ctx, updateQuery, req.Quantity, shopID, itemID).Scan(&newQuantity); err != nil {
+        if err == sql.ErrNoRows {
+            return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Item not found in this shop for stock adjustment"})
+        }
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to adjust stock"})
 	}
 
@@ -67,6 +83,7 @@ func HandleAdjustStock(c *fiber.Ctx) error {
 
 	return c.SendStatus(fiber.StatusNoContent)
 }
+
 
 // HandleGetStockMovementHistory retrieves the stock movement history for an item.
 func HandleGetStockMovementHistory(c *fiber.Ctx) error {

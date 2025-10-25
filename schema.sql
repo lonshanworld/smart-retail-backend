@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS sale_items (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
     inventory_item_id UUID NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT,
+	item_name VARCHAR(255) NOT NULL, -- Denormalized for historical accuracy
+    item_sku VARCHAR(100),         -- Denormalized for historical accuracy
     quantity_sold INTEGER NOT NULL,
     selling_price_at_sale NUMERIC(10, 2) NOT NULL,
     original_price_at_sale NUMERIC(10, 2),

@@ -80,24 +80,6 @@ func HandleSearchProductsForPOS(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "success", "data": items})
 }
 
-// --- Checkout Logic ---
-
-// CheckoutItem represents a single item in the checkout request.
-type CheckoutItem struct {
-	ProductID          string  `json:"productId"`
-	Quantity           int     `json:"quantity"`
-	SellingPriceAtSale float64 `json:"sellingPriceAtSale"`
-}
-
-// CheckoutRequest is the full request body for the checkout endpoint.
-type CheckoutRequest struct {
-	ShopID                string         `json:"shopId"`
-	Items                 []CheckoutItem `json:"items"`
-	TotalAmount           float64        `json:"totalAmount"`
-	PaymentType           string         `json:"paymentType"`
-	StripePaymentIntentID *string        `json:"stripePaymentIntentId,omitempty"`
-}
-
 // HandleCheckout processes a new sale in a transaction.
 func HandleCheckout(c *fiber.Ctx) error {
 	db := database.GetDB()
@@ -108,7 +90,7 @@ func HandleCheckout(c *fiber.Ctx) error {
 	merchantID := claims["userId"].(string)
 	staffID := claims["sub"].(string) // The actual user performing the action
 
-	var req CheckoutRequest
+	var req models.CheckoutRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}

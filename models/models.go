@@ -116,6 +116,7 @@ type InventoryItem struct {
 	IsArchived        bool      `json:"is_archived"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+	Stock             *ShopStock `json:"stock,omitempty"`
 }
 
 // InventoryItemWithQuantity extends InventoryItem with shop-specific stock quantity.
@@ -381,6 +382,12 @@ type PaginatedShopStockResponse struct {
 	TotalPages  int             `json:"total_pages"`
 }
 
+// PaginatedShopCustomersResponse for shop customers.
+type PaginatedShopCustomersResponse struct {
+	Data       []ShopCustomer `json:"data"`
+	Pagination Pagination     `json:"pagination"`
+}
+
 type ShopStockItem struct {
 	ID              string    `json:"id"`
 	ShopID          string    `json:"shop_id"`
@@ -417,6 +424,7 @@ type ShopDashboardSummary struct {
 	LowStockItems     int     `json:"lowStockItems"`
 }
 
+
 type ReceiptItem struct {
 	ItemName  string  `json:"item_name"`
 	Quantity  int     `json:"quantity"`
@@ -436,4 +444,45 @@ type StaffRecentActivity struct {
 	Timestamp time.Time `json:"timestamp"`
 	Details   string    `json:"details"`
 	RelatedID string    `json:"related_id"`
+}
+
+
+// --- POS --- //
+
+// CheckoutItem represents a single item in the checkout request.
+type CheckoutItem struct {
+	ProductID          string  `json:"productId"`
+	Quantity           int     `json:"quantity"`
+	SellingPriceAtSale float64 `json:"sellingPriceAtSale"`
+}
+
+// CheckoutRequest is the full request body for the checkout endpoint.
+type CheckoutRequest struct {
+	ShopID                string         `json:"shopId"`
+	Items                 []CheckoutItem `json:"items"`
+	TotalAmount           float64        `json:"totalAmount"`
+	PaymentType           string         `json:"paymentType"`
+	CustomerID            *string        `json:"customerId,omitempty"`
+	StripePaymentIntentID *string        `json:"stripePaymentIntentId,omitempty"`
+}
+
+// ShopInventoryItem is a simplified view of an inventory item for the shop interface.
+type ShopInventoryItem struct {
+	ID           string  `json:"id"`
+	ProductID    string  `json:"productId"`
+	Name         string  `json:"name"`
+	SKU          string  `json:"sku"`
+	Quantity     int     `json:"quantity"`
+	SellingPrice float64 `json:"sellingPrice"`
+}
+
+// StockInItem represents a single item in a stock-in request.
+type StockInItem struct {
+	ProductID string `json:"productId"`
+	Quantity  int    `json:"quantity"`
+}
+
+// StockInRequest is the request body for the stock-in endpoint.
+type StockInRequest struct {
+	Items []StockInItem `json:"items"`
 }

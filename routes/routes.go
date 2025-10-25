@@ -30,10 +30,10 @@ func SetupRoutes(app *fiber.App) {
 	admin.Get("/users/merchants-for-selection", handlers.HandleGetMerchantsForSelection) // Must be before /users/:userId
 	admin.Post("/users", handlers.HandleCreateUser)
 	admin.Get("/users", handlers.HandleListUsers)
-	admin.Get("/users/:userId", handlers.HandleGetUserByID)
-	admin.Put("/users/:userId", handlers.HandleUpdateUser)
-	admin.Put("/users/:userId/status", handlers.HandleSetUserStatus)
-	admin.Delete("/users/:userId/permanent-delete", handlers.HandleHardDeleteUser)
+	admin.Get("/:userId", handlers.HandleGetUserByID)
+	admin.Put("/:userId", handlers.HandleUpdateUser)
+	admin.Put("/:userId/status", handlers.HandleSetUserStatus)
+	admin.Delete("/:userId/permanent-delete", handlers.HandleHardDeleteUser)
 
 	// Specific Admin-related routes
 	admin.Get("/admins", handlers.HandleGetAdmins)
@@ -148,10 +148,26 @@ func SetupRoutes(app *fiber.App) {
 	// --- Staff Routes ---
 	staff := api.Group("/staff", middleware.JWTMiddleware, middleware.StaffRequired)
 	staff.Get("/dashboard/summary", handlers.HandleGetStaffDashboardSummary)
+	staff.Get("/assigned-shop", handlers.HandleGetAssignedShop)
+	staff.Get("/profile", handlers.HandleGetStaffProfile)
+	staff.Get("/salary", handlers.HandleGetSalaryHistory)
+
 
 	// --- Shop Routes ---
 	shop := api.Group("/shop", middleware.JWTMiddleware, middleware.StaffRequired)
 	shop.Get("/dashboard/summary", handlers.HandleGetShopDashboardSummary)
+	shop.Get("/profile", handlers.HandleGetShopProfile)
+
+	// New routes for shop inventory management
+	shop.Get("/items", handlers.HandleGetShopItems)
+	shop.Put("/items/:itemId/stock", handlers.HandleUpdateShopItemStock)
+	shop.Get("/inventory", handlers.HandleGetShopInventory)
+	shop.Post("/inventory/stock-in", handlers.HandleStockIn)
+
+	// --- Shop POS Routes ---
+	shopPOS := shop.Group("/pos")
+	shopPOS.Get("/products", handlers.HandleSearchShopProducts)
+	shopPOS.Post("/checkout", handlers.HandleShopCheckout)
 
 	// --- Gemini Routes ---
 	gemini := api.Group("/gemini", middleware.JWTMiddleware)

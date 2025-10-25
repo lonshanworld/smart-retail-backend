@@ -70,7 +70,7 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
 		}
-		setClauses = append(setClauses, fmt.Sprintf("password = $%d", paramIndex))
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", paramIndex))
 		args = append(args, hashedPassword)
 		paramIndex++
 	}

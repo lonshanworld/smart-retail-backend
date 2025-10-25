@@ -4,8 +4,11 @@ import (
 	"app/database"
 	"app/models"
 	"context"
+	"fmt"
 	"log"
 	"strconv"
+	"strings"
+	"database/sql"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v4"
@@ -94,6 +97,19 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
+	// Check for existing email
+	var existingId string
+	emailCheckQuery := "SELECT id FROM users WHERE email = $1"
+	err := db.QueryRow(ctx, emailCheckQuery, req.Email).Scan(&existingId)
+	if err != nil && err != sql.ErrNoRows {
+		log.Printf("Error checking for existing email: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	if existingId != "" {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": "error", "message": "Email is already in use"})
+	}
+
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
@@ -112,7 +128,7 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 
 	if err != nil {
 		log.Printf("Error creating merchant staff: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create staff member. Email may already be in use."})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create staff member."})
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": newStaff})
@@ -130,6 +146,7 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 
 	type UpdateStaffRequest struct {
 		Name           *string `json:"name,omitempty"`
+		Password       *string `json:"password,omitempty"`
 		IsActive       *bool   `json:"isActive,omitempty"`
 		AssignedShopID *string `json:"assignedShopId,omitempty"`
 	}
@@ -138,19 +155,48 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
+	
+	var setClauses []string
+	args := make([]interface{}, 0)
+	paramIndex := 1
 
-	// Build query dynamically based on provided fields
-	// (Implementation omitted for brevity, but would be similar to HandleUpdateMerchantProfile)
+	if req.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", paramIndex))
+		args = append(args, *req.Name)
+		paramIndex++
+	}
+	if req.Password != nil {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
+		}
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", paramIndex))
+		args = append(args, hashedPassword)
+		paramIndex++
+	}
+	if req.IsActive != nil {
+		setClauses = append(setClauses, fmt.Sprintf("is_active = $%d", paramIndex))
+		args = append(args, *req.IsActive)
+		paramIndex++
+	}
+	if req.AssignedShopID != nil {
+		setClauses = append(setClauses, fmt.Sprintf("assigned_shop_id = $%d", paramIndex))
+		args = append(args, *req.AssignedShopID)
+		paramIndex++
+	}
 
-	query := `
-		UPDATE users
-		SET name = COALESCE($1, name), is_active = COALESCE($2, is_active), assigned_shop_id = $3, updated_at = NOW()
-		WHERE id = $4 AND merchant_id = $5 AND role = 'staff'
-		RETURNING id, name, email, role, is_active, merchant_id, assigned_shop_id, created_at, updated_at
-	`
+	if len(setClauses) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Nothing to update"})
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+	
+	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d AND merchant_id = $%d AND role = 'staff' RETURNING id, name, email, role, is_active, merchant_id, assigned_shop_id, created_at, updated_at", strings.Join(setClauses, ", "), paramIndex, paramIndex+1)
+	args = append(args, staffId, merchantId)
+
 
 	var updatedStaff models.User
-	err := db.QueryRow(ctx, query, req.Name, req.IsActive, req.AssignedShopID, staffId, merchantId).Scan(
+	err := db.QueryRow(ctx, query, args...).Scan(
 		&updatedStaff.ID, &updatedStaff.Name, &updatedStaff.Email, &updatedStaff.Role, &updatedStaff.IsActive, &updatedStaff.MerchantID, &updatedStaff.AssignedShopID, &updatedStaff.CreatedAt, &updatedStaff.UpdatedAt,
 	)
 
