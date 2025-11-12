@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetCombinedStocks handles fetching a combined, paginated list of all inventory items from all shops.
@@ -16,9 +16,14 @@ func HandleGetCombinedStocks(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantId := claims.UserID
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "20"))
@@ -49,7 +54,7 @@ func HandleGetCombinedStocks(c *fiber.Ctx) error {
 
 	// Get total count
 	var totalCount int
-	err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount)
+	err = db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount)
 	if err != nil {
 		log.Printf("Error counting combined stocks: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})

@@ -8,6 +8,7 @@ import (
 	"app/config"
 	"app/database"
 	"app/models"
+	"app/utils"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v4"
@@ -20,6 +21,16 @@ func HandleLogin(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Cannot parse JSON"})
 	}
+
+	// Validate and normalize role
+	normalizedRole, valid := utils.ValidateAndNormalizeRole(req.UserType)
+	if !valid {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"status":  "error",
+			"message": "Invalid user type. Must be one of: admin, merchant, or staff",
+		})
+	}
+	req.UserType = normalizedRole
 
 	var user models.User
 	var passwordHash string
@@ -50,6 +61,25 @@ func HandleLogin(c *fiber.Ctx) error {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Invalid credentials"})
+	}
+
+	// If merchant and shopId is provided, verify ownership
+	if user.Role == "merchant" && req.ShopID != nil && *req.ShopID != "" {
+		var shopMerchantID string
+		shopQuery := "SELECT merchant_id FROM shops WHERE id = $1"
+		err := database.GetDB().QueryRow(c.Context(), shopQuery, *req.ShopID).Scan(&shopMerchantID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
+			}
+			log.Printf("Error verifying shop ownership: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		}
+		if shopMerchantID != user.ID {
+			log.Printf("Access denied: Merchant %s attempted to access shop %s owned by %s", user.ID, *req.ShopID, shopMerchantID)
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied to this shop"})
+		}
+		log.Printf("✅ Merchant %s verified as owner of shop %s", user.ID, *req.ShopID)
 	}
 
 	token, err := createJWT(user.ID, user.Role)

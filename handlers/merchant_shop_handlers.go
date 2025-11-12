@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
@@ -15,9 +16,11 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantID := claims.UserID
 
 	query := `SELECT id, name, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE merchant_id = $1`
 	rows, err := db.Query(ctx, query, merchantID)
@@ -45,8 +48,8 @@ func HandleUpdateMerchantShop(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims := user.Claims.(*models.JwtClaims)
+	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
 	var req models.Shop
@@ -78,8 +81,8 @@ func HandleDeleteMerchantShop(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims := user.Claims.(*models.JwtClaims)
+	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
 
@@ -98,8 +101,8 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims := user.Claims.(*models.JwtClaims)
+	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
 
@@ -111,9 +114,21 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 	}
 
 	query := `
-        SELECT ii.id, ii.merchant_id, ii.name, ii.description, ii.sku, 
-               ii.selling_price, ii.original_price, ii.low_stock_threshold, 
-               ii.category, ii.supplier_id, ii.is_archived, ii.created_at, ii.updated_at, ss.quantity
+        SELECT 
+            ii.id, 
+            ii.merchant_id, 
+            ii.name, 
+            ii.description, 
+            ii.sku, 
+            ii.selling_price, 
+            ii.original_price, 
+            ii.low_stock_threshold, 
+            ii.category, 
+            ii.supplier_id, 
+            ii.is_archived, 
+            ii.created_at, 
+            ii.updated_at, 
+            ss.quantity
         FROM inventory_items ii
         JOIN shop_stock ss ON ii.id = ss.inventory_item_id
         WHERE ss.shop_id = $1
@@ -128,10 +143,39 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 	products := make([]models.InventoryItemWithQuantity, 0)
 	for rows.Next() {
 		var p models.InventoryItemWithQuantity
-		if err := rows.Scan(&p.ID, &p.MerchantID, &p.Name, &p.Description, &p.SKU, &p.SellingPrice, &p.OriginalPrice, &p.LowStockThreshold, &p.Category, &p.SupplierID, &p.IsArchived, &p.CreatedAt, &p.UpdatedAt, &p.Quantity); err != nil {
+		var description, sku, category, supplierID *string
+		var originalPrice *float64
+		var lowStockThreshold *int
+
+		err := rows.Scan(
+			&p.ID,
+			&p.MerchantID,
+			&p.Name,
+			&description,
+			&sku,
+			&p.SellingPrice,
+			&originalPrice,
+			&lowStockThreshold,
+			&category,
+			&supplierID,
+			&p.IsArchived,
+			&p.CreatedAt,
+			&p.UpdatedAt,
+			&p.Quantity,
+		)
+		if err != nil {
 			log.Printf("Error scanning product data: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to process product data"})
 		}
+
+		// Assign nullable fields
+		p.Description = description
+		p.SKU = sku
+		p.OriginalPrice = originalPrice
+		p.LowStockThreshold = lowStockThreshold
+		p.Category = category
+		p.SupplierID = supplierID
+
 		products = append(products, p)
 	}
 

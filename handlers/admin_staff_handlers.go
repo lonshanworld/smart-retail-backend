@@ -8,11 +8,31 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 // HandleGetAllStaff handles the GET /api/admin/staff endpoint
+// StaffResponse represents the staff member data in the response
+type StaffResponse struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Email        string    `json:"email"`
+	Role         string    `json:"role"`
+	IsActive     bool      `json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	MerchantID   string    `json:"merchant_id,omitempty"`
+	MerchantName string    `json:"merchant_name,omitempty"`
+}
+
+// PaginatedStaffResponse represents a paginated response containing staff members
+type PaginatedStaffResponse struct {
+	Data       []StaffResponse   `json:"data"`
+	Pagination models.Pagination `json:"pagination"`
+}
+
 func HandleGetAllStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
@@ -29,9 +49,10 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count staff"})
 	}
 
-	// Get paginated data
+	// Get paginated data with merchant info directly from users table
 	query := `
-		SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, m.name as merchant_name
+		SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at,
+			   m.id as merchant_id, m.name as merchant_name
 		FROM users u
 		LEFT JOIN users m ON u.merchant_id = m.id
 		WHERE u.role = 'staff'
@@ -45,21 +66,42 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 	}
 	defer rows.Close()
 
-	var staff []models.User
+	var staff []StaffResponse
 	for rows.Next() {
-		var user models.User
-		var merchantName sql.NullString
-		if err := rows.Scan(&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive, &user.CreatedAt, &user.UpdatedAt, &merchantName); err != nil {
+		var staffMember StaffResponse
+		var merchantID, merchantName sql.NullString
+
+		if err := rows.Scan(
+			&staffMember.ID,
+			&staffMember.Name,
+			&staffMember.Email,
+			&staffMember.Role,
+			&staffMember.IsActive,
+			&staffMember.CreatedAt,
+			&staffMember.UpdatedAt,
+			&merchantID,
+			&merchantName,
+		); err != nil {
 			log.Printf("Error scanning staff row: %v", err)
 			continue
 		}
-		if merchantName.Valid {
-			// This is a bit of a hack, as the User model doesn't have a MerchantName field.
-			// In a real application, you might want to create a specific struct for this response.
-			// For now, we'll just log it.
-			log.Printf("Staff member %s is part of merchant %s", user.ID, merchantName.String)
+
+		// Log the raw data we get from database
+		log.Printf("Raw staff data - ID: %s, Name: %s, Email: %s, Role: %s, IsActive: %v",
+			staffMember.ID, staffMember.Name, staffMember.Email, staffMember.Role, staffMember.IsActive)
+		log.Printf("Raw merchant data - MerchantID: %v (valid: %v), MerchantName: %v (valid: %v)",
+			merchantID.String, merchantID.Valid, merchantName.String, merchantName.Valid)
+
+		if merchantID.Valid && merchantName.Valid {
+			staffMember.MerchantID = merchantID.String
+			staffMember.MerchantName = merchantName.String
+			log.Printf("Setting merchant info for staff %s - MerchantID: %s, MerchantName: %s",
+				staffMember.Name, staffMember.MerchantID, staffMember.MerchantName)
+		} else {
+			log.Printf("No valid merchant info found for staff %s", staffMember.Name)
 		}
-		staff = append(staff, user)
+
+		staff = append(staff, staffMember)
 	}
 
 	pagination := models.Pagination{
@@ -69,7 +111,7 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 		PageSize:    limit,
 	}
 
-	return c.JSON(models.PaginatedUsersResponse{
+	return c.JSON(PaginatedStaffResponse{
 		Data:       staff,
 		Pagination: pagination,
 	})

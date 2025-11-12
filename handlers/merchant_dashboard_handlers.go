@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetMerchantDashboardSummary fetches summary data for the merchant dashboard.
@@ -16,11 +16,18 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	// --- Authorization: Get merchantID from JWT claims ---
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		log.Printf("[MerchantDashboard] Failed to extract claims: %v", err)
+		return err
+	}
+	merchantID := claims.UserID
+	log.Printf("[MerchantDashboard] Fetching dashboard for merchant: %s", merchantID)
 
 	shopID := c.Query("shop_id") // Optional shop_id from query parameter
+	if shopID != "" {
+		log.Printf("[MerchantDashboard] Filtering by shop_id: %s", shopID)
+	}
 
 	var summary models.MerchantDashboardSummary
 
@@ -35,7 +42,7 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 		querySales += " AND shop_id = $2"
 		argsSales = append(argsSales, shopID)
 	}
-	err := db.QueryRow(ctx, querySales, argsSales...).Scan(&summary.TotalSalesRevenue.Value)
+	err = db.QueryRow(ctx, querySales, argsSales...).Scan(&summary.TotalSalesRevenue.Value)
 	if err != nil {
 		log.Printf("Error fetching total sales revenue: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch total sales revenue"})
@@ -52,11 +59,13 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 		queryTransactions += " AND shop_id = $2"
 		argsTransactions = append(argsTransactions, shopID)
 	}
-	err = db.QueryRow(ctx, queryTransactions, argsTransactions...).Scan(&summary.NumberOfTransactions.Value)
+	var transactionCount int64
+	err = db.QueryRow(ctx, queryTransactions, argsTransactions...).Scan(&transactionCount)
 	if err != nil {
 		log.Printf("Error fetching number of transactions: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch number of transactions"})
 	}
+	summary.NumberOfTransactions.Value = float64(transactionCount)
 
 	// 3. Average Order Value
 	if summary.NumberOfTransactions.Value > 0 {
@@ -105,6 +114,9 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 		products = append(products, p)
 	}
 	summary.TopSellingProducts = products
+
+	log.Printf("[MerchantDashboard] Returning summary - Revenue: %.2f, Transactions: %.0f, Products: %d",
+		summary.TotalSalesRevenue.Value, summary.NumberOfTransactions.Value, len(summary.TopSellingProducts))
 
 	return c.JSON(summary)
 }

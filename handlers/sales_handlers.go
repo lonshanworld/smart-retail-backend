@@ -12,12 +12,10 @@ import (
 // CreateSaleInput defines the expected input for creating a new sale.
 
 type CreateSaleInput struct {
-	ShopID      string              `json:"shopId"`
-	PaymentType string              `json:"paymentType"`
+	ShopID      string            `json:"shopId"`
+	PaymentType string            `json:"paymentType"`
 	Items       []models.SaleItem `json:"items"`
 }
-
-
 
 // HandleCreateSale handles the creation of a new sale.
 func HandleCreateSale(c *fiber.Ctx) error {
@@ -86,6 +84,8 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 	pageSize := c.QueryInt("pageSize", 10)
 	offset := (page - 1) * pageSize
 
+	log.Printf("📥 [SALES HANDLER] Fetching sales for shopID: %s, page: %d, pageSize: %d", shopID, page, pageSize)
+
 	query := `
 		SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
 		FROM sales
@@ -94,7 +94,7 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 	`
 	rows, err := db.Query(ctx, query, shopID, pageSize, offset)
 	if err != nil {
-		log.Printf("Error listing sales for shop: %v", err)
+		log.Printf("❌ [SALES HANDLER] Error listing sales for shop: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve sales"})
 	}
 	defer rows.Close()
@@ -103,21 +103,54 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 	for rows.Next() {
 		var sale models.Sale
 		if err := rows.Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
-			log.Printf("Error scanning sale: %v", err)
+			log.Printf("❌ [SALES HANDLER] Error scanning sale: %v", err)
 			continue
 		}
+
+		log.Printf("✅ [SALES HANDLER] Found sale ID: %s, ShopID: %s, TotalAmount: %.2f, SaleDate: %s", sale.ID, sale.ShopID, sale.TotalAmount, sale.SaleDate)
+
+		// Fetch sale items for this sale
+		itemsQuery := `
+			SELECT id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal
+			FROM sale_items
+			WHERE sale_id = $1
+		`
+		itemRows, err := db.Query(ctx, itemsQuery, sale.ID)
+		if err != nil {
+			log.Printf("⚠️ [SALES HANDLER] Error fetching sale items for sale ID %s: %v", sale.ID, err)
+			// Don't fail the entire request if items fail
+			sale.Items = []models.SaleItem{}
+		} else {
+			defer itemRows.Close()
+			var items []models.SaleItem
+			for itemRows.Next() {
+				var item models.SaleItem
+				if err := itemRows.Scan(&item.ID, &item.SaleID, &item.InventoryItemID, &item.QuantitySold, &item.SellingPriceAtSale, &item.OriginalPriceAtSale, &item.Subtotal); err != nil {
+					log.Printf("⚠️ [SALES HANDLER] Error scanning sale item: %v", err)
+					continue
+				}
+				log.Printf("   📦 [SALES HANDLER] Item: %s, Qty: %d, SellingPrice: %.2f, OriginalPrice: %.2f, Subtotal: %.2f",
+					item.InventoryItemID, item.QuantitySold, item.SellingPriceAtSale, item.OriginalPriceAtSale, item.Subtotal)
+				items = append(items, item)
+			}
+			sale.Items = items
+			log.Printf("   📋 [SALES HANDLER] Total items in sale: %d", len(items))
+		}
+
 		sales = append(sales, sale)
 	}
 
 	var totalItems int
 	countQuery := "SELECT COUNT(*) FROM sales WHERE shop_id = $1"
 	if err := db.QueryRow(ctx, countQuery, shopID).Scan(&totalItems); err != nil {
-		log.Printf("Error counting sales: %v", err)
+		log.Printf("❌ [SALES HANDLER] Error counting sales: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count sales"})
 	}
 
+	log.Printf("📊 [SALES HANDLER] Total sales count: %d, Returning: %d sales", totalItems, len(sales))
+
 	response := models.PaginatedSalesResponse{
-		Items:       sales,
+		Items: sales,
 		Pagination: models.Pagination{
 			TotalItems:  totalItems,
 			CurrentPage: page,
@@ -169,8 +202,8 @@ func HandleGetReceipt(c *fiber.Ctx) error {
 	`
 	var receipt models.Receipt
 	if err := db.QueryRow(ctx, query, saleID).Scan(
-		&receipt.SaleID, &receipt.SaleDate, &receipt.ShopName, &receipt.ShopAddress, &receipt.MerchantName, 
-		&receipt.FinalTotal, &receipt.DiscountAmount, &receipt.OriginalTotal, 
+		&receipt.SaleID, &receipt.SaleDate, &receipt.ShopName, &receipt.ShopAddress, &receipt.MerchantName,
+		&receipt.FinalTotal, &receipt.DiscountAmount, &receipt.OriginalTotal,
 		&receipt.PaymentType, &receipt.PaymentStatus,
 	); err != nil {
 		log.Printf("Error getting receipt: %v", err)

@@ -11,6 +11,9 @@ import (
 func SetupRoutes(app *fiber.App) {
 	api := app.Group("/api/v1")
 
+	// --- System Initialization ---
+	api.Post("/init/admin", handlers.HandleInitializeAdmin)
+
 	// --- Authentication Routes ---
 	auth := api.Group("/auth")
 	auth.Post("/login", handlers.HandleLogin)
@@ -77,17 +80,15 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Patch("/:shopId/inventory/:inventoryItemId/adjust-stock", handlers.HandleAdjustStockItem)
 	merchantShops.Get("/:shopId/sales", handlers.HandleListSalesForShop)
 
-    // New routes for stock adjustment and history
-    merchantShops.Post("/:shopId/inventory/:itemId/adjust", handlers.HandleAdjustStock)
-    merchantShops.Get("/:shopId/inventory/:itemId/history", handlers.HandleGetStockMovementHistory)
-
+	// New routes for stock adjustment and history
+	merchantShops.Post("/:shopId/inventory/:itemId/adjust", handlers.HandleAdjustStock)
+	merchantShops.Get("/:shopId/inventory/:itemId/history", handlers.HandleGetStockMovementHistory)
 
 	// Merchant Sales
 	merchantSales := merchant.Group("/sales")
 	merchantSales.Post("/", handlers.HandleCreateSale)
 	merchantSales.Get("/:saleId", handlers.HandleGetSaleByID)
 	merchantSales.Get("/:saleId/receipt", handlers.HandleGetReceipt)
-
 
 	// Merchant Promotions
 	promotions := merchant.Group("/promotions")
@@ -114,7 +115,7 @@ func SetupRoutes(app *fiber.App) {
 	// Merchant Notifications
 	notifications := merchant.Group("/notifications")
 	notifications.Get("/", handlers.HandleGetNotifications)
-	notifications.Get("/unread-count", handlers.HandleGetUnreadNotificationsCount)
+	notifications.Get("/unread-count", handlers.HandleGetUnreadNotificationCount)
 	notifications.Patch("/:notificationId/read", handlers.HandleMarkNotificationAsRead)
 
 	// Merchant Payments
@@ -124,6 +125,7 @@ func SetupRoutes(app *fiber.App) {
 	// Merchant POS
 	pos := merchant.Group("/pos")
 	pos.Get("/products", handlers.HandleSearchProductsForPOS)
+	pos.Get("/promotions", handlers.HandleGetActivePromotionsForPOS)
 	pos.Post("/checkout", handlers.HandleCheckout)
 
 	customers := merchant.Group("/customers")
@@ -141,6 +143,7 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Get("/", handlers.HandleListInventoryItems)
 	inventory.Post("/", handlers.HandleCreateInventoryItem)
 	inventory.Post("/stock-in", handlers.HandleMerchantStockIn)
+	inventory.Post("/move-stock", handlers.HandleMoveStock)
 	inventory.Get("/:itemId", handlers.HandleGetInventoryItemByID)
 	inventory.Put("/:itemId", handlers.HandleUpdateInventoryItem)
 	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
@@ -157,11 +160,16 @@ func SetupRoutes(app *fiber.App) {
 	// --- Staff POS Routes ---
 	staffPOS := staff.Group("/pos")
 	staffPOS.Get("/products", handlers.HandleSearchProductsForStaff)
+	staffPOS.Get("/promotions", handlers.HandleGetActivePromotionsForStaff)
 	staffPOS.Post("/checkout", handlers.HandleStaffCheckout)
 
+	// --- Staff Items Routes ---
+	staffItems := staff.Group("/items")
+	staffItems.Get("/", handlers.HandleGetStaffItems)
 
 	// --- Shop Routes ---
-	shop := api.Group("/shop", middleware.JWTMiddleware, middleware.StaffRequired)
+	// Shop routes are accessible by both merchants (with shopId param) and staff (with assigned shop)
+	shop := api.Group("/shop", middleware.JWTMiddleware)
 	shop.Get("/dashboard/summary", handlers.HandleGetShopDashboardSummary)
 	shop.Get("/profile", handlers.HandleGetShopProfile) // Corrected route
 
@@ -171,9 +179,19 @@ func SetupRoutes(app *fiber.App) {
 	shop.Get("/inventory", handlers.HandleGetShopInventory)
 	shop.Post("/inventory/stock-in", handlers.HandleStockIn)
 
+	// Shop customers routes (accessible by both merchant and staff)
+	shopCustomers := shop.Group("/customers")
+	shopCustomers.Get("/search", handlers.HandleSearchCustomers)
+	shopCustomers.Post("/", handlers.HandleCreateCustomer)
+
+	// Shop sales routes (accessible by both merchant and staff)
+	shopSales := shop.Group("/shops/:shopId/sales")
+	shopSales.Get("/", handlers.HandleListSalesForShop)
+
 	// --- Shop POS Routes ---
 	shopPOS := shop.Group("/pos")
 	shopPOS.Get("/:shopId/products", handlers.HandleSearchShopProducts)
+	shopPOS.Get("/promotions", handlers.HandleGetActivePromotionsForShop)
 	shopPOS.Post("/:shopId/checkout", handlers.HandleShopCheckout)
 
 	// --- Gemini Routes ---

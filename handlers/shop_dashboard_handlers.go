@@ -2,30 +2,65 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetShopDashboardSummary retrieves a summary for the shop dashboard.
+// Accessible by both merchants (with shopId query param) and staff (using assigned_shop_id).
 func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	staffID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
+	userRole := claims.Role
 
-	// Get assigned shop ID for the staff member
 	var shopID string
-	shopQuery := "SELECT assigned_shop_id FROM users WHERE id = $1"
-	if err := db.QueryRow(ctx, shopQuery, staffID).Scan(&shopID); err != nil {
-		log.Printf("Error getting staff's assigned shop: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shop details"})
+
+	// Both merchant and staff should provide shopId query parameter
+	shopID = c.Query("shopId")
+	if shopID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "shopId query parameter is required"})
+	}
+
+	if userRole == "merchant" {
+		// Verify merchant owns the shop
+		var merchantID string
+		shopCheckQuery := "SELECT merchant_id FROM shops WHERE id = $1"
+		if err := db.QueryRow(ctx, shopCheckQuery, shopID).Scan(&merchantID); err != nil {
+			log.Printf("Error verifying shop ownership: %v", err)
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
+		}
+		if merchantID != userID {
+			log.Printf("Access denied: Shop %s belongs to merchant %s, not %s", shopID, merchantID, userID)
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied to this shop"})
+		}
+	} else if userRole == "staff" {
+		// Verify staff is assigned to this shop
+		var assignedShopID *string
+		staffQuery := "SELECT assigned_shop_id FROM users WHERE id = $1"
+		if err := db.QueryRow(ctx, staffQuery, userID).Scan(&assignedShopID); err != nil {
+			log.Printf("Error getting staff's assigned shop: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve staff details"})
+		}
+		if assignedShopID == nil || *assignedShopID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Staff member has no assigned shop"})
+		}
+		if *assignedShopID != shopID {
+			log.Printf("Access denied: Staff %s is assigned to shop %s, not %s", userID, *assignedShopID, shopID)
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied to this shop"})
+		}
+	} else {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied"})
 	}
 
 	// Get sales and transactions for today
@@ -61,5 +96,8 @@ func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 		LowStockItems:     lowStockItems,
 	}
 
-	return c.JSON(summary)
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    summary,
+	})
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetStaffDashboardSummary retrieves a summary for the staff dashboard.
@@ -17,9 +17,11 @@ func HandleGetStaffDashboardSummary(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	staffID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	staffID := claims.UserID
 
 	// Get assigned shop name
 	var shopName string
@@ -78,5 +80,8 @@ func HandleGetStaffDashboardSummary(c *fiber.Ctx) error {
 		RecentActivities:  activities,
 	}
 
-	return c.JSON(summary)
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    summary,
+	})
 }

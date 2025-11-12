@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"encoding/json"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
 )
@@ -22,51 +22,127 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantID := claims.UserID
 
 	// Parse query parameters
-	startDate := c.Query("startDate", time.Now().AddDate(0, -1, 0).Format(time.RFC3339))
-	endDate := c.Query("endDate", time.Now().Format(time.RFC3339))
+	startDateStr := c.Query("startDate", time.Now().AddDate(0, -1, 0).Format(time.RFC3339))
+	endDateStr := c.Query("endDate", time.Now().Format(time.RFC3339))
 	shopID := c.Query("shopId")
-	groupBy := c.Query("groupBy", "daily") // daily, weekly, monthly
+	groupBy := c.Query("groupBy", "daily") // Not used for now, but kept for future
 
-	// Base query
+	log.Printf("📊 [SALES REPORT] Request - Merchant: %s, StartDate: %s, EndDate: %s, ShopID: %s, GroupBy: %s",
+		merchantID, startDateStr, endDateStr, shopID, groupBy)
+
+	// Parse dates - try multiple formats
+	parseDate := func(dateStr string) (time.Time, error) {
+		formats := []string{
+			time.RFC3339,
+			time.RFC3339Nano,
+			"2006-01-02T15:04:05.999999",
+			"2006-01-02T15:04:05",
+			"2006-01-02",
+		}
+		var lastErr error
+		for _, format := range formats {
+			if t, err := time.Parse(format, dateStr); err == nil {
+				return t, nil
+			} else {
+				lastErr = err
+			}
+		}
+		return time.Time{}, lastErr
+	}
+
+	startDate, err := parseDate(startDateStr)
+	if err != nil {
+		log.Printf("❌ [SALES REPORT] Invalid startDate: %v", err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid startDate format"})
+	}
+	endDate, err := parseDate(endDateStr)
+	if err != nil {
+		log.Printf("❌ [SALES REPORT] Invalid endDate: %v", err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid endDate format"})
+	}
+
+	// Query to get actual sale records (not aggregated)
 	query := `
-        SELECT 
-            date_trunc($4, sale_date) as period,
-            SUM(total_amount) as total_sales
+        SELECT id, shop_id, merchant_id, sale_date, total_amount, 
+               applied_promotion_id, discount_amount, payment_type, payment_status,
+               created_at, updated_at
         FROM sales
         WHERE merchant_id = $1 AND sale_date BETWEEN $2 AND $3
     `
-	args := []interface{}{merchantID, startDate, endDate, groupBy}
+	args := []interface{}{merchantID, startDate, endDate}
 
 	// Add shop filter if provided
 	if shopID != "" {
-		query += " AND shop_id = $5"
+		query += " AND shop_id = $4"
 		args = append(args, shopID)
 	}
 
-	query += " GROUP BY period ORDER BY period"
+	query += " ORDER BY sale_date DESC"
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error getting sales report: %v", err)
+		log.Printf("❌ [SALES REPORT] Query error: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to generate sales report"})
 	}
 	defer rows.Close()
 
-	var results []models.SalesReportData
+	sales := make([]models.Sale, 0)
 	for rows.Next() {
-		var r models.SalesReportData
-		if err := rows.Scan(&r.Period, &r.TotalSales); err != nil {
+		var sale models.Sale
+		if err := rows.Scan(
+			&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.SaleDate,
+			&sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount,
+			&sale.PaymentType, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt,
+		); err != nil {
+			log.Printf("❌ [SALES REPORT] Scan error: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to process sales report data"})
 		}
-		results = append(results, r)
+
+		// Fetch sale items for each sale
+		itemsQuery := `
+			SELECT id, sale_id, inventory_item_id, item_name, item_sku, 
+			       quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal,
+			       created_at, updated_at
+			FROM sale_items 
+			WHERE sale_id = $1
+		`
+		itemRows, err := db.Query(ctx, itemsQuery, sale.ID)
+		if err != nil {
+			log.Printf("⚠️  [SALES REPORT] Failed to fetch items for sale %s: %v", sale.ID, err)
+			sale.Items = []models.SaleItem{} // Empty items if fetch fails
+		} else {
+			items := make([]models.SaleItem, 0)
+			for itemRows.Next() {
+				var item models.SaleItem
+				if err := itemRows.Scan(
+					&item.ID, &item.SaleID, &item.InventoryItemID, &item.ItemName,
+					&item.ItemSKU, &item.QuantitySold, &item.SellingPriceAtSale,
+					&item.OriginalPriceAtSale, &item.Subtotal, &item.CreatedAt, &item.UpdatedAt,
+				); err != nil {
+					log.Printf("⚠️  [SALES REPORT] Failed to scan item: %v", err)
+					continue
+				}
+				items = append(items, item)
+			}
+			itemRows.Close()
+			sale.Items = items
+		}
+
+		sales = append(sales, sale)
 	}
 
-	return c.JSON(fiber.Map{"success": true, "data": results})
+	log.Printf("✅ [SALES REPORT] Returning %d sales", len(sales))
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"sales": sales}})
 }
 
 // HandleGetSalesForecast generates a sales forecast for a product using Gemini.
@@ -74,9 +150,14 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantID := claims.UserID
 
 	shopID := c.Query("shopId")
 	itemID := c.Query("itemId")
@@ -127,7 +208,7 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-1.5-pro")
+	model := client.GenerativeModel("gemini-2.5-flash-lite")
 	model.SafetySettings = []*genai.SafetySetting{
 		{
 			Category:  genai.HarmCategoryDangerousContent,
@@ -228,9 +309,9 @@ func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopN
 
 	var geminiJSON struct {
 		Forecast        []models.DailyForecast `json:"forecast"`
-		Summary         string               `json:"summary"`
-		PositiveFactors []string             `json:"positive_factors"`
-		NegativeFactors []string             `json:"negative_factors"`
+		Summary         string                 `json:"summary"`
+		PositiveFactors []string               `json:"positive_factors"`
+		NegativeFactors []string               `json:"negative_factors"`
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &geminiJSON); err != nil {
@@ -239,16 +320,16 @@ func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopN
 	}
 
 	return &models.SalesForecastResponse{
-		ReportName:     "7-Day Sales Forecast",
-		GeneratedAt:    time.Now(),
-		ProductName:    productName,
-		ShopName:       shopName,
-		CurrentStock:   currentStock,
+		ReportName:   "7-Day Sales Forecast",
+		GeneratedAt:  time.Now(),
+		ProductName:  productName,
+		ShopName:     shopName,
+		CurrentStock: currentStock,
 		ForecastPeriod: models.ForecastPeriod{
 			StartDate: time.Now(),
 			EndDate:   time.Now().AddDate(0, 0, 7),
 		},
-		DailyForecast:  geminiJSON.Forecast,
+		DailyForecast: geminiJSON.Forecast,
 		AiAnalysis: models.AiAnalysis{
 			Summary:         geminiJSON.Summary,
 			PositiveFactors: geminiJSON.PositiveFactors,

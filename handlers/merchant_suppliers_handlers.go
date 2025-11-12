@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"app/utils"
 	"context"
@@ -13,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleListMerchantSuppliers handles the request to list merchant suppliers with pagination.
@@ -21,9 +21,11 @@ func HandleListMerchantSuppliers(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
@@ -99,9 +101,11 @@ func HandleGetSupplierDetails(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 	supplierId := c.Params("supplierId")
 
 	var s models.Supplier
@@ -109,7 +113,7 @@ func HandleGetSupplierDetails(c *fiber.Ctx) error {
 	query := `SELECT id, merchant_id, name, contact_name, contact_email, contact_phone, address, notes, created_at, updated_at
 	          FROM suppliers WHERE id = $1 AND merchant_id = $2`
 
-	err := db.QueryRow(ctx, query, supplierId, merchantId).Scan(
+	err = db.QueryRow(ctx, query, supplierId, merchantId).Scan(
 		&s.ID, &s.MerchantID, &s.Name, &contactName, &contactEmail, &contactPhone, &address, &notes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
@@ -134,9 +138,11 @@ func HandleCreateNewSupplier(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 
 	var input models.Supplier
 	if err := c.BodyParser(&input); err != nil {
@@ -149,7 +155,7 @@ func HandleCreateNewSupplier(c *fiber.Ctx) error {
 	          VALUES ($1, $2, $3, $4, $5, $6, $7) 
 	          RETURNING id, created_at, updated_at`
 
-	err := db.QueryRow(ctx, query, input.MerchantID, input.Name, input.ContactName, input.ContactEmail, input.ContactPhone, input.Address, input.Notes).Scan(&input.ID, &input.CreatedAt, &input.UpdatedAt)
+	err = db.QueryRow(ctx, query, input.MerchantID, input.Name, input.ContactName, input.ContactEmail, input.ContactPhone, input.Address, input.Notes).Scan(&input.ID, &input.CreatedAt, &input.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "suppliers_merchant_id_name_key") {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "A supplier with this name already exists for your account."})
@@ -166,9 +172,11 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 	supplierId := c.Params("supplierId")
 
 	var updates map[string]interface{}
@@ -201,7 +209,7 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	var s models.Supplier
 	var contactName, contactEmail, contactPhone, address, notes sql.NullString
 
-	err := db.QueryRow(ctx, query, args...).Scan(
+	err = db.QueryRow(ctx, query, args...).Scan(
 		&s.ID, &s.MerchantID, &s.Name, &contactName, &contactEmail, &contactPhone, &address, &notes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
@@ -226,9 +234,11 @@ func HandleDeleteExistingSupplier(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 	supplierId := c.Params("supplierId")
 
 	query := "DELETE FROM suppliers WHERE id = $1 AND merchant_id = $2"
@@ -251,9 +261,11 @@ func HandleGetSuppliersForSelection(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantId := claims.UserID
 
 	query := "SELECT id, name FROM suppliers WHERE merchant_id = $1 ORDER BY name"
 

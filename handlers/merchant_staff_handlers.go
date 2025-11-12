@@ -2,16 +2,16 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
-	"database/sql"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/jackc/pgx/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -20,9 +20,14 @@ func HandleListMerchantStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantId := claims.UserID
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
@@ -31,8 +36,7 @@ func HandleListMerchantStaff(c *fiber.Ctx) error {
 	// Get total count
 	var totalCount int
 	countQuery := "SELECT COUNT(*) FROM users WHERE role = 'staff' AND merchant_id = $1"
-	err := db.QueryRow(ctx, countQuery, merchantId).Scan(&totalCount)
-	if err != nil {
+	if err = db.QueryRow(ctx, countQuery, merchantId).Scan(&totalCount); err != nil {
 		log.Printf("Error counting merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
 	}
@@ -81,9 +85,14 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantId := claims.UserID
 
 	type CreateStaffRequest struct {
 		Name           string  `json:"name"`
@@ -97,22 +106,35 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
+	log.Printf("Parsed request: name=%s, email=%s, assignedShopId=%v", req.Name, req.Email, req.AssignedShopID)
+	if req.AssignedShopID != nil {
+		log.Printf("AssignedShopID value: '%s'", *req.AssignedShopID)
+	}
+
 	// Check for existing email
 	var existingId string
 	emailCheckQuery := "SELECT id FROM users WHERE email = $1"
-	err := db.QueryRow(ctx, emailCheckQuery, req.Email).Scan(&existingId)
-	if err != nil && err != sql.ErrNoRows {
-		log.Printf("Error checking for existing email: %v", err)
+	checkErr := db.QueryRow(ctx, emailCheckQuery, req.Email).Scan(&existingId)
+	if checkErr != nil && checkErr != pgx.ErrNoRows {
+		log.Printf("Error checking for existing email: %v", checkErr)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
 	}
-	if existingId != "" {
+	if checkErr == nil {
+		// Email exists
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": "error", "message": "Email is already in use"})
 	}
-
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
+	}
+
+	// Convert empty string to nil for assigned_shop_id
+	var assignedShopID interface{}
+	if req.AssignedShopID != nil && *req.AssignedShopID != "" {
+		assignedShopID = *req.AssignedShopID
+	} else {
+		assignedShopID = nil
 	}
 
 	query := `
@@ -122,12 +144,13 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	`
 
 	var newStaff models.User
-	err = db.QueryRow(ctx, query, req.Name, req.Email, string(hashedPassword), merchantId, req.AssignedShopID).Scan(
+	err = db.QueryRow(ctx, query, req.Name, req.Email, string(hashedPassword), merchantId, assignedShopID).Scan(
 		&newStaff.ID, &newStaff.Name, &newStaff.Email, &newStaff.Role, &newStaff.IsActive, &newStaff.MerchantID, &newStaff.AssignedShopID, &newStaff.CreatedAt, &newStaff.UpdatedAt,
 	)
 
 	if err != nil {
 		log.Printf("Error creating merchant staff: %v", err)
+		log.Printf("merchantId: %s, assignedShopId: %v", merchantId, assignedShopID)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create staff member."})
 	}
 
@@ -139,9 +162,14 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantId := claims.UserID
 	staffId := c.Params("staffId")
 
 	type UpdateStaffRequest struct {
@@ -155,7 +183,7 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
-	
+
 	var setClauses []string
 	args := make([]interface{}, 0)
 	paramIndex := 1
@@ -190,17 +218,14 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	}
 
 	setClauses = append(setClauses, "updated_at = NOW()")
-	
+
 	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d AND merchant_id = $%d AND role = 'staff' RETURNING id, name, email, role, is_active, merchant_id, assigned_shop_id, created_at, updated_at", strings.Join(setClauses, ", "), paramIndex, paramIndex+1)
 	args = append(args, staffId, merchantId)
 
-
 	var updatedStaff models.User
-	err := db.QueryRow(ctx, query, args...).Scan(
+	if err = db.QueryRow(ctx, query, args...).Scan(
 		&updatedStaff.ID, &updatedStaff.Name, &updatedStaff.Email, &updatedStaff.Role, &updatedStaff.IsActive, &updatedStaff.MerchantID, &updatedStaff.AssignedShopID, &updatedStaff.CreatedAt, &updatedStaff.UpdatedAt,
-	)
-
-	if err != nil {
+	); err != nil {
 		log.Printf("Error updating merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update staff member."})
 	}
@@ -213,9 +238,14 @@ func HandleDeleteMerchantStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"message": "Unauthorized",
+		})
+	}
+	merchantId := claims.UserID
 	staffId := c.Params("staffId")
 
 	query := "DELETE FROM users WHERE id = $1 AND merchant_id = $2 AND role = 'staff'"

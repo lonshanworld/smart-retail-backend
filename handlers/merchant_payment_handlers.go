@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"context"
 	"log"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/stripe/stripe-go/v72"
 	"github.com/stripe/stripe-go/v72/paymentintent"
 )
@@ -34,12 +34,14 @@ func HandleCreatePaymentIntent(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantID := claims.UserID
 
 	var req CreatePaymentIntentRequest
-	if err := c.BodyParser(&req); err != nil {
+	if err = c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
 	}
 
@@ -79,7 +81,7 @@ func HandleCreatePaymentIntent(c *fiber.Ctx) error {
 
 		if currentStock < item.QuantitySold {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"success": false, 
+				"success": false,
 				"message": "Insufficient stock for item: " + itemName,
 			})
 		}

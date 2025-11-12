@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"database/sql"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -18,14 +18,16 @@ func HandleGetMerchantProfile(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	userId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userId := claims.UserID
 
 	var userProfile models.User
 	query := "SELECT id, name, email, phone, role, created_at, updated_at FROM users WHERE id = $1 AND role = 'merchant'"
 
-	err := db.QueryRow(ctx, query, userId).Scan(&userProfile.ID, &userProfile.Name, &userProfile.Email, &userProfile.Phone, &userProfile.Role, &userProfile.CreatedAt, &userProfile.UpdatedAt)
+	err = db.QueryRow(ctx, query, userId).Scan(&userProfile.ID, &userProfile.Name, &userProfile.Email, &userProfile.Phone, &userProfile.Role, &userProfile.CreatedAt, &userProfile.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
@@ -41,9 +43,11 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	userId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userId := claims.UserID
 
 	type UpdateRequest struct {
 		Name     string `json:"name,omitempty"`
@@ -86,7 +90,7 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 	args = append(args, userId)
 
 	var updatedUser models.User
-	err := db.QueryRow(ctx, query, args...).Scan(&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Phone, &updatedUser.Role, &updatedUser.CreatedAt, &updatedUser.UpdatedAt)
+	err = db.QueryRow(ctx, query, args...).Scan(&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Phone, &updatedUser.Role, &updatedUser.CreatedAt, &updatedUser.UpdatedAt)
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update profile"})

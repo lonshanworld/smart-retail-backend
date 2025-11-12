@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetShopInventory godoc
@@ -26,9 +26,11 @@ func HandleGetShopInventory(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var assignedShopID string
 	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
@@ -89,12 +91,14 @@ func HandleStockIn(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var req models.StockInRequest
-	if err := c.BodyParser(&req); err != nil {
+	if err = c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 

@@ -8,7 +8,6 @@ import (
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/jackc/pgx/v4"
 )
 
@@ -22,10 +21,11 @@ func HandleShopStockIn(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	// Extract user claims
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	// Extract merchant ID from locals (set by middleware)
+	merchantID, ok := c.Locals("userID").(string)
+	if !ok || merchantID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Unauthorized"})
+	}
 
 	// Get shopId from URL
 	shopID := c.Params("shopId")

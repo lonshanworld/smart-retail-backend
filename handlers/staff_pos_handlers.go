@@ -2,12 +2,13 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleSearchProductsForStaff godoc
@@ -26,9 +27,11 @@ func HandleSearchProductsForStaff(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var assignedShopID string
 	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
@@ -83,19 +86,33 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var assignedShopID, merchantID string
 	userQuery := `SELECT assigned_shop_id, merchant_id FROM users WHERE id = $1`
-	if err := db.QueryRow(ctx, userQuery, userID).Scan(&assignedShopID, &merchantID); err != nil {
+	if err = db.QueryRow(ctx, userQuery, userID).Scan(&assignedShopID, &merchantID); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found for this user"})
 	}
 
 	var req models.StaffCheckoutRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+
+	// If customer name is provided but no customer ID, create a new customer
+	if req.CustomerName != nil && *req.CustomerName != "" && req.CustomerID == nil {
+		customerID, err := createCustomerFromName(ctx, db, assignedShopID, merchantID, *req.CustomerName)
+		if err != nil {
+			log.Printf("Warning: Failed to create customer from name '%s': %v", *req.CustomerName, err)
+			// Don't fail the checkout, just log the warning and continue without customer
+		} else {
+			req.CustomerID = &customerID
+			log.Printf("Created new customer %s for name '%s'", customerID, *req.CustomerName)
+		}
 	}
 
 	tx, err := db.Begin(ctx)
@@ -105,8 +122,8 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	defer tx.Rollback(ctx)
 
 	saleQuery := `
-        INSERT INTO sales (shop_id, merchant_id, staff_id, total_amount, payment_type, payment_status)
-        VALUES ($1, $2, $3, $4, $5, 'succeeded')
+        INSERT INTO sales (shop_id, merchant_id, staff_id, total_amount, payment_type, payment_status, customer_id)
+        VALUES ($1, $2, $3, $4, $5, 'succeeded', $6)
         RETURNING id, sale_date, created_at, updated_at
     `
 	var sale models.Sale
@@ -116,19 +133,32 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	sale.TotalAmount = req.TotalAmount
 	sale.PaymentType = req.PaymentType
 	sale.PaymentStatus = "succeeded"
+	sale.CustomerID = req.CustomerID
 
-	err = tx.QueryRow(ctx, saleQuery, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, sale.PaymentType).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
+	err = tx.QueryRow(ctx, saleQuery, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, sale.PaymentType, req.CustomerID).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating sale: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale"})
 	}
 
 	for _, item := range req.Items {
+		// Fetch item details from inventory_items for denormalization
+		var itemName string
+		var itemSKU *string
+		var originalPrice *float64
+		itemQuery := `SELECT name, sku, original_price FROM inventory_items WHERE id = $1`
+		err := tx.QueryRow(ctx, itemQuery, item.ProductID).Scan(&itemName, &itemSKU, &originalPrice)
+		if err != nil {
+			log.Printf("Failed to fetch inventory item details for product %s: %v", item.ProductID, err)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": fmt.Sprintf("Product %s not found", item.ProductID)})
+		}
+
+		subtotal := float64(item.Quantity) * item.SellingPriceAtSale
 		saleItemQuery := `
-            INSERT INTO sale_items (sale_id, inventory_item_id, quantity_sold, selling_price_at_sale)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO sale_items (sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `
-		_, err := tx.Exec(ctx, saleItemQuery, sale.ID, item.ProductID, item.Quantity, item.SellingPriceAtSale)
+		_, err = tx.Exec(ctx, saleItemQuery, sale.ID, item.ProductID, itemName, itemSKU, item.Quantity, item.SellingPriceAtSale, originalPrice, subtotal)
 		if err != nil {
 			log.Printf("Error creating sale item: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale item"})
@@ -169,4 +199,65 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": sale})
+}
+
+// HandleGetActivePromotionsForStaff godoc
+// @Summary Get active promotions for staff's assigned shop
+// @Description Fetches all active promotions that can be applied in the staff member's assigned shop.
+// @Tags Staff POS
+// @Accept  json
+// @Produce  json
+// @Security ApiKeyAuth
+// @Success 200 {array} models.Promotion
+// @Failure 401 {object} fiber.Map{message=string}
+// @Failure 500 {object} fiber.Map{message=string}
+// @Router /api/v1/staff/pos/promotions [get]
+func HandleGetActivePromotionsForStaff(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
+
+	var assignedShopID, merchantID string
+	userQuery := `SELECT assigned_shop_id, merchant_id FROM users WHERE id = $1`
+	if err = db.QueryRow(ctx, userQuery, userID).Scan(&assignedShopID, &merchantID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found for this user"})
+	}
+
+	query := `
+		SELECT id, merchant_id, shop_id, name, description, promo_type, promo_value, min_spend, 
+		       start_date, end_date, is_active, created_at, updated_at
+		FROM promotions
+		WHERE merchant_id = $1
+		  AND (shop_id IS NULL OR shop_id = $2)
+		  AND is_active = TRUE
+		  AND (start_date IS NULL OR start_date <= NOW())
+		  AND (end_date IS NULL OR end_date >= NOW())
+		ORDER BY created_at DESC
+	`
+
+	rows, err := db.Query(ctx, query, merchantID, assignedShopID)
+	if err != nil {
+		log.Printf("Error fetching promotions: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to fetch promotions"})
+	}
+	defer rows.Close()
+
+	promotions := []models.Promotion{} // Initialize as empty slice instead of nil
+	for rows.Next() {
+		var promo models.Promotion
+		if err := rows.Scan(&promo.ID, &promo.MerchantID, &promo.ShopID, &promo.Name, &promo.Description,
+			&promo.PromoType, &promo.PromoValue, &promo.MinSpend,
+			&promo.StartDate, &promo.EndDate, &promo.IsActive, &promo.CreatedAt, &promo.UpdatedAt); err != nil {
+			log.Printf("Error scanning promotion: %v", err)
+			continue
+		}
+		promotions = append(promotions, promo)
+	}
+
+	return c.JSON(fiber.Map{"status": "success", "data": promotions})
 }

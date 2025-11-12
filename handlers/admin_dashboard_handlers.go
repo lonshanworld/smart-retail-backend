@@ -16,29 +16,56 @@ func HandleGetAdminDashboardSummary(c *fiber.Ctx) error {
 
 	var summary models.AdminDashboardSummary
 
-	// Total Active Merchants
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'merchant' AND is_active = true").Scan(&summary.TotalActiveMerchants); err != nil {
+	// Total Merchants
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'merchant'").Scan(&summary.TotalMerchants); err != nil {
+		log.Printf("Error counting total merchants: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count total merchants"})
+	}
+
+	// Active Merchants
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'merchant' AND is_active = true").Scan(&summary.ActiveMerchants); err != nil {
 		log.Printf("Error counting active merchants: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active merchants"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count active merchants"})
 	}
 
-	// Total Active Staff
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'staff' AND is_active = true").Scan(&summary.TotalActiveStaff); err != nil {
+	// Total Staff
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'staff'").Scan(&summary.TotalStaff); err != nil {
+		log.Printf("Error counting total staff: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count total staff"})
+	}
+
+	// Active Staff
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE role = 'staff' AND is_active = true").Scan(&summary.ActiveStaff); err != nil {
 		log.Printf("Error counting active staff: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active staff"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count active staff"})
 	}
 
-	// Total Active Shops
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shops WHERE is_active = true").Scan(&summary.TotalActiveShops); err != nil {
-		log.Printf("Error counting active shops: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count active shops"})
+	// Total Shops
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shops").Scan(&summary.TotalShops); err != nil {
+		log.Printf("Error counting total shops: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count total shops"})
 	}
 
-	// Total Products Listed
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_items WHERE is_archived = false").Scan(&summary.TotalProductsListed); err != nil {
-		log.Printf("Error counting products: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count products"})
+	// Total Sales Value (all time)
+	if err := db.QueryRow(ctx, "SELECT COALESCE(SUM(total_amount), 0) FROM sales").Scan(&summary.TotalSalesValue); err != nil {
+		log.Printf("Error calculating total sales value: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to calculate total sales"})
 	}
 
-	return c.JSON(summary)
+	// Sales Today
+	if err := db.QueryRow(ctx, "SELECT COALESCE(SUM(total_amount), 0) FROM sales WHERE DATE(created_at) = CURRENT_DATE").Scan(&summary.SalesToday); err != nil {
+		log.Printf("Error calculating today's sales: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to calculate today's sales"})
+	}
+
+	// Transactions Today
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales WHERE DATE(created_at) = CURRENT_DATE").Scan(&summary.TransactionsToday); err != nil {
+		log.Printf("Error counting today's transactions: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count today's transactions"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    summary,
+	})
 }

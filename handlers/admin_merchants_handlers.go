@@ -120,25 +120,25 @@ func HandleListMerchants(c *fiber.Ctx) error {
 	})
 }
 
-
-// HandleGetMerchantByID retrieves details for a single merchant, including their associated shop.
+// HandleGetMerchantByID retrieves details for a single merchant, including all their associated shops.
 func HandleGetMerchantByID(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 	merchantIdOrUserId := c.Params("merchantIdOrUserId")
 
-	query := `
-        SELECT u.id, u.name, u.email, u.is_active, s.name as shop_name, u.created_at, u.updated_at
-        FROM users u
-        LEFT JOIN shops s ON u.id = s.merchant_id AND s.is_primary = true
-        WHERE u.id = $1 AND u.role = 'merchant'
+	// First, get the merchant user details
+	userQuery := `
+        SELECT id, name, email, phone, is_active, created_at, updated_at
+        FROM users
+        WHERE id = $1 AND role = 'merchant'
     `
 
 	var merchant models.Merchant
-	var shopName sql.NullString
+	var phone sql.NullString
 
-	err := db.QueryRow(ctx, query, merchantIdOrUserId).Scan(
-		&merchant.ID, &merchant.Name, &merchant.Email, &merchant.IsActive, &shopName, &merchant.CreatedAt, &merchant.UpdatedAt,
+	err := db.QueryRow(ctx, userQuery, merchantIdOrUserId).Scan(
+		&merchant.ID, &merchant.Name, &merchant.Email, &phone,
+		&merchant.IsActive, &merchant.CreatedAt, &merchant.UpdatedAt,
 	)
 
 	if err != nil {
@@ -149,9 +149,113 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
 	}
 
-	if shopName.Valid {
-		merchant.ShopName = &shopName.String
+	if phone.Valid {
+		merchant.Phone = &phone.String
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": merchant})
+	// Now fetch all shops for this merchant
+	shopsQuery := `
+        SELECT id, merchant_id, name, address, phone, is_active, is_primary, created_at, updated_at
+        FROM shops
+        WHERE merchant_id = $1
+        ORDER BY is_primary DESC, created_at ASC
+    `
+
+	rows, err := db.Query(ctx, shopsQuery, merchantIdOrUserId)
+	if err != nil {
+		log.Printf("Error fetching shops for merchant %s: %v", merchantIdOrUserId, err)
+		// Return merchant without shops but with proper structure
+		return c.JSON(fiber.Map{
+			"status": "success",
+			"data": fiber.Map{
+				"id":        merchant.ID,
+				"name":      merchant.Name,
+				"email":     merchant.Email,
+				"phone":     merchant.Phone,
+				"isActive":  merchant.IsActive,
+				"shopName":  merchant.ShopName,
+				"createdAt": merchant.CreatedAt,
+				"updatedAt": merchant.UpdatedAt,
+				"shops":     []models.Shop{}, // Empty array instead of nil
+			},
+		})
+	}
+	defer rows.Close()
+
+	var shops []models.Shop
+	for rows.Next() {
+		var shop models.Shop
+		var address sql.NullString
+		var phoneShop sql.NullString
+
+		err := rows.Scan(
+			&shop.ID, &shop.MerchantID, &shop.Name, &address, &phoneShop,
+			&shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+		)
+		if err != nil {
+			log.Printf("Error scanning shop row: %v", err)
+			continue
+		}
+
+		if address.Valid {
+			shop.Address = &address.String
+		}
+		if phoneShop.Valid {
+			shop.Phone = &phoneShop.String
+		}
+
+		shops = append(shops, shop)
+	}
+
+	// Ensure shops is not nil
+	if shops == nil {
+		shops = []models.Shop{}
+	}
+
+	// For backward compatibility, set shopName to primary shop name
+	if len(shops) > 0 {
+		for _, shop := range shops {
+			if shop.IsPrimary {
+				merchant.ShopName = &shop.Name
+				break
+			}
+		}
+		// If no primary shop, use first shop
+		if merchant.ShopName == nil {
+			merchant.ShopName = &shops[0].Name
+		}
+	}
+
+	log.Printf("Returning merchant %s with %d shops", merchantIdOrUserId, len(shops))
+
+	// Construct response
+	responseData := fiber.Map{
+		"id":        merchant.ID,
+		"name":      merchant.Name,
+		"email":     merchant.Email,
+		"phone":     merchant.Phone,
+		"isActive":  merchant.IsActive,
+		"shopName":  merchant.ShopName,
+		"createdAt": merchant.CreatedAt,
+		"updatedAt": merchant.UpdatedAt,
+		"shops":     shops,
+	}
+
+	log.Printf("Response data keys: %v", getMapKeys(responseData))
+	log.Printf("Shops in response: %+v", shops)
+
+	// Return merchant with shops array
+	return c.JSON(fiber.Map{
+		"status": "success",
+		"data":   responseData,
+	})
+}
+
+// Helper function to get map keys for debugging
+func getMapKeys(m fiber.Map) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

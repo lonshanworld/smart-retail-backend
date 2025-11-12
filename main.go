@@ -45,6 +45,13 @@ func main() {
 	// Setup routes
 	routes.SetupRoutes(app)
 
+	// Get port from environment variable, default to 3000
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "5000"
+	}
+
 	// Start server
-	log.Fatal(app.Listen(":3000"))
+	log.Printf("Server starting on port %s", port)
+	log.Fatal(app.Listen(":" + port))
 }

@@ -2,198 +2,285 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
 )
 
 // HandleAIAssistant provides AI-powered insights based on a user's prompt.
+// It uses Gemini to generate safe SQL queries from natural language.
 func HandleAIAssistant(c *fiber.Ctx) error {
 	var req models.AIAssistantRequest
 	if err := c.BodyParser(&req); err != nil {
+		log.Printf("❌ [AI ASSISTANT] Failed to parse request body: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request"})
 	}
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
-
-	// 1. Classify the user's intent
-	intent, err := classifyIntent(req.Prompt)
+	claims, err := middleware.ExtractClaims(c)
 	if err != nil {
+		log.Printf("❌ [AI ASSISTANT] Failed to extract claims: %v", err)
+		return err
+	}
+	merchantID := claims.UserID
+
+	log.Printf("🤖 [AI ASSISTANT] Starting request")
+	log.Printf("   Merchant ID: %s", merchantID)
+	log.Printf("   User Prompt: %s", req.Prompt)
+
+	// 1. Use AI to generate SQL query from natural language
+	log.Printf("🔄 [AI ASSISTANT] Step 1: Generating SQL from prompt...")
+	sqlQuery, err := generateSQLFromPrompt(req.Prompt, merchantID)
+	if err != nil {
+		log.Printf("❌ [AI ASSISTANT] Failed to generate SQL: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
+	log.Printf("✅ [AI ASSISTANT] Generated SQL: %s", sqlQuery)
 
-	// 2. Fetch data based on the intent
-	data, err := fetchDataForIntent(intent, merchantID)
+	// 2. Validate the SQL query (security check)
+	log.Printf("🔄 [AI ASSISTANT] Step 2: Validating SQL query...")
+	if err := validateSQLQuery(sqlQuery); err != nil {
+		log.Printf("❌ [AI ASSISTANT] SQL validation failed: %v", err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Invalid query: %s", err.Error())})
+	}
+	log.Printf("✅ [AI ASSISTANT] SQL validation passed")
+
+	// 3. Execute the query safely
+	log.Printf("🔄 [AI ASSISTANT] Step 3: Executing SQL query...")
+	queryResult, err := executeSafeQuery(sqlQuery)
 	if err != nil {
+		log.Printf("❌ [AI ASSISTANT] Query execution failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Query execution failed: %s", err.Error())})
+	}
+	log.Printf("✅ [AI ASSISTANT] Query executed successfully, returned %d rows", len(queryResult))
+
+	// 4. Use AI to format the results in a human-readable way
+	log.Printf("🔄 [AI ASSISTANT] Step 4: Formatting results with AI...")
+	analysis, err := formatResultsWithAI(req.Prompt, queryResult)
+	if err != nil {
+		log.Printf("❌ [AI ASSISTANT] Failed to format results: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
+	log.Printf("✅ [AI ASSISTANT] Analysis generated successfully")
 
-	// 3. Generate a human-readable analysis
-	analysis, err := generateAnalysis(req.Prompt, intent, data)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
-	}
-
-	return c.JSON(fiber.Map{"success": true, "analysis": analysis})
+	log.Printf("🎉 [AI ASSISTANT] Request completed successfully")
+	return c.JSON(fiber.Map{"success": true, "analysis": analysis, "sql": sqlQuery, "data": queryResult})
 }
 
-// classifyIntent uses Gemini to determine the user's intent.
-func classifyIntent(prompt string) (string, error) {
+// generateSQLFromPrompt uses Gemini to convert natural language to SQL
+func generateSQLFromPrompt(prompt string, merchantID string) (string, error) {
+	log.Printf("   🔍 [SQL GEN] Creating AI client...")
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 	if err != nil {
+		log.Printf("   ❌ [SQL GEN] Failed to create AI client: %v", err)
 		return "", fmt.Errorf("failed to create AI client: %w", err)
 	}
 	defer client.Close()
+	log.Printf("   ✅ [SQL GEN] AI client created")
 
-	model := client.GenerativeModel("gemini-1.5-pro")
-	classificationPrompt := fmt.Sprintf(
-		`You are an intent classification system. Classify the user's prompt into one of the following categories: 'best_sellers', 'highest_sales', 'peak_hours', or 'unknown'. The user prompt is: "%s"`,
-		prompt,
-	)
+	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
-	resp, err := model.GenerateContent(ctx, genai.Text(classificationPrompt))
+	// Database schema information
+	schemaInfo := `
+Database Schema:
+- sales (id, shop_id, merchant_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, created_at, updated_at)
+- sale_items (id, sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
+- inventory_items (id, merchant_id, name, sku, description, category, original_price, selling_price, created_at, updated_at)
+- shops (id, merchant_id, name, address, phone, created_at, updated_at)
+- shop_stocks (shop_id, inventory_item_id, stock_level, reorder_point, last_restocked, created_at, updated_at)
+- promotions (id, merchant_id, name, description, discount_percentage, min_spend, start_date, end_date, is_active, created_at, updated_at)
+- customers (id, merchant_id, name, email, phone, total_spent, created_at, updated_at)
+- staff (id, merchant_id, shop_id, name, email, role, created_at, updated_at)
+
+Important:
+- The merchant_id for this query is: '` + merchantID + `'
+- ALWAYS filter by merchant_id = '` + merchantID + `' to ensure data security
+- Use PostgreSQL syntax
+- Return ONLY a valid SELECT query, nothing else
+- Do NOT use INSERT, UPDATE, DELETE, DROP, ALTER, or any DDL/DML commands
+- Limit results to 100 rows maximum using LIMIT clause
+`
+
+	sqlPrompt := fmt.Sprintf(`%s
+
+User Question: "%s"
+
+Generate a PostgreSQL SELECT query that answers this question. 
+Return ONLY the SQL query without any explanation, code blocks, or markdown.
+The query MUST include WHERE merchant_id = '%s' for security.`, schemaInfo, prompt, merchantID)
+
+	log.Printf("   🔍 [SQL GEN] Sending prompt to Gemini AI...")
+	log.Printf("   📝 [SQL GEN] User question: %s", prompt)
+	resp, err := model.GenerateContent(ctx, genai.Text(sqlPrompt))
 	if err != nil {
-		return "", fmt.Errorf("failed to classify intent: %w", err)
+		log.Printf("   ❌ [SQL GEN] Gemini API error: %v", err)
+		return "", fmt.Errorf("failed to generate SQL: %w", err)
 	}
 
-	intent := strings.TrimSpace(fmt.Sprint(resp.Candidates[0].Content.Parts[0]))
-	if intent == "best_sellers" || intent == "highest_sales" || intent == "peak_hours" {
-		return intent, nil
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		log.Printf("   ❌ [SQL GEN] No response from Gemini AI")
+		return "", fmt.Errorf("no SQL generated")
 	}
-	return "unknown", nil
+
+	sqlQuery := strings.TrimSpace(fmt.Sprint(resp.Candidates[0].Content.Parts[0]))
+	log.Printf("   📋 [SQL GEN] Raw AI response: %s", sqlQuery)
+
+	// Clean up the SQL (remove markdown code blocks if present)
+	sqlQuery = strings.TrimPrefix(sqlQuery, "```sql")
+	sqlQuery = strings.TrimPrefix(sqlQuery, "```")
+	sqlQuery = strings.TrimSuffix(sqlQuery, "```")
+	sqlQuery = strings.TrimSpace(sqlQuery)
+
+	log.Printf("   ✨ [SQL GEN] Cleaned SQL: %s", sqlQuery)
+	return sqlQuery, nil
 }
 
-// fetchDataForIntent queries the database based on the classified intent.
-func fetchDataForIntent(intent, merchantID string) (interface{}, error) {
+// validateSQLQuery ensures the query is safe (only SELECT, no dangerous operations)
+func validateSQLQuery(query string) error {
+	log.Printf("   🔍 [SQL VALIDATE] Starting validation...")
+	log.Printf("   📝 [SQL VALIDATE] Query: %s", query)
+
+	queryUpper := strings.ToUpper(strings.TrimSpace(query))
+
+	// Must start with SELECT
+	if !strings.HasPrefix(queryUpper, "SELECT") {
+		log.Printf("   ❌ [SQL VALIDATE] Query does not start with SELECT")
+		return fmt.Errorf("only SELECT queries are allowed")
+	}
+	log.Printf("   ✅ [SQL VALIDATE] Query starts with SELECT")
+
+	// Forbidden keywords
+	forbiddenKeywords := []string{
+		"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
+		"CREATE", "REPLACE", "GRANT", "REVOKE", "EXEC", "EXECUTE",
+		"--", "/*", "*/", ";--", "UNION", "INTO OUTFILE", "INTO DUMPFILE",
+	}
+
+	for _, keyword := range forbiddenKeywords {
+		if strings.Contains(queryUpper, keyword) {
+			log.Printf("   ❌ [SQL VALIDATE] Forbidden keyword detected: %s", keyword)
+			return fmt.Errorf("forbidden keyword detected: %s", keyword)
+		}
+	}
+	log.Printf("   ✅ [SQL VALIDATE] No forbidden keywords found")
+
+	// Must contain merchant_id filter for security
+	if !strings.Contains(queryUpper, "MERCHANT_ID") {
+		log.Printf("   ❌ [SQL VALIDATE] Query missing merchant_id filter")
+		return fmt.Errorf("query must filter by merchant_id for security")
+	}
+	log.Printf("   ✅ [SQL VALIDATE] merchant_id filter present")
+
+	// Must have LIMIT clause
+	if !strings.Contains(queryUpper, "LIMIT") {
+		log.Printf("   ❌ [SQL VALIDATE] Query missing LIMIT clause")
+		return fmt.Errorf("query must include LIMIT clause")
+	}
+	log.Printf("   ✅ [SQL VALIDATE] LIMIT clause present")
+
+	log.Printf("   🎉 [SQL VALIDATE] All validations passed!")
+	return nil
+}
+
+// executeSafeQuery runs the validated SQL query and returns results
+func executeSafeQuery(query string) ([]map[string]interface{}, error) {
+	log.Printf("   🔍 [SQL EXEC] Connecting to database...")
 	db := database.GetDB()
 	ctx := context.Background()
 
-	switch intent {
-	case "best_sellers":
-		query := `
-            SELECT i.name, SUM(si.quantity_sold) as total_sold
-            FROM sale_items si
-            JOIN inventory_items i ON si.inventory_item_id = i.id
-            JOIN sales s ON si.sale_id = s.id
-            WHERE s.merchant_id = $1
-            GROUP BY i.name
-            ORDER BY total_sold DESC
-            LIMIT 10
-        `
-		rows, err := db.Query(ctx, query, merchantID)
+	log.Printf("   🔍 [SQL EXEC] Executing query...")
+	rows, err := db.Query(ctx, query)
+	if err != nil {
+		log.Printf("   ❌ [SQL EXEC] Query failed: %v", err)
+		return nil, fmt.Errorf("query execution error: %w", err)
+	}
+	defer rows.Close()
+	log.Printf("   ✅ [SQL EXEC] Query executed successfully")
+
+	// Get column names
+	fieldDescriptions := rows.FieldDescriptions()
+	columnNames := make([]string, len(fieldDescriptions))
+	for i, fd := range fieldDescriptions {
+		columnNames[i] = string(fd.Name)
+	}
+	log.Printf("   📋 [SQL EXEC] Column names: %v", columnNames)
+
+	// Fetch all rows
+	var results []map[string]interface{}
+	rowCount := 0
+	for rows.Next() {
+		values, err := rows.Values()
 		if err != nil {
-			return nil, fmt.Errorf("failed to query best sellers: %w", err)
+			log.Printf("   ⚠️  [SQL EXEC] Failed to scan row %d: %v", rowCount, err)
+			continue
 		}
-		defer rows.Close()
 
-		var bestSellers []models.BestSeller
-		for rows.Next() {
-			var seller models.BestSeller
-			if err := rows.Scan(&seller.ProductName, &seller.TotalSold); err != nil {
-				continue
-			}
-			bestSellers = append(bestSellers, seller)
+		row := make(map[string]interface{})
+		for i, col := range columnNames {
+			row[col] = values[i]
 		}
-		return bestSellers, nil
-
-	case "highest_sales":
-		query := `
-            SELECT sh.name, SUM(s.total_amount) as total_sales
-            FROM sales s
-            JOIN shops sh ON s.shop_id = sh.id
-            WHERE s.merchant_id = $1
-            GROUP BY sh.name
-            ORDER BY total_sales DESC
-            LIMIT 10
-        `
-		rows, err := db.Query(ctx, query, merchantID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query highest sales: %w", err)
-		}
-		defer rows.Close()
-
-		var shopSales []models.ShopSales
-		for rows.Next() {
-			var shop models.ShopSales
-			if err := rows.Scan(&shop.ShopName, &shop.TotalSales); err != nil {
-				continue
-			}
-			shopSales = append(shopSales, shop)
-		}
-		return shopSales, nil
-
-	case "peak_hours":
-		query := `
-            SELECT EXTRACT(HOUR FROM sale_date) as hour, COUNT(*) as total_sales
-            FROM sales
-            WHERE merchant_id = $1
-            GROUP BY hour
-            ORDER BY total_sales DESC
-        `
-		rows, err := db.Query(ctx, query, merchantID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query peak hours: %w", err)
-		}
-		defer rows.Close()
-
-		var peakHours []models.PeakHour
-		for rows.Next() {
-			var hour models.PeakHour
-			if err := rows.Scan(&hour.Hour, &hour.TotalSales); err != nil {
-				continue
-			}
-			peakHours = append(peakHours, hour)
-		}
-		return peakHours, nil
+		results = append(results, row)
+		rowCount++
 	}
 
-	return nil, nil // No data for 'unknown' intent
+	log.Printf("   ✅ [SQL EXEC] Retrieved %d rows", rowCount)
+	if rowCount > 0 {
+		log.Printf("   📋 [SQL EXEC] Sample row 1: %+v", results[0])
+	}
+	return results, nil
 }
 
-// generateAnalysis uses Gemini to create a human-readable analysis.
-func generateAnalysis(originalPrompt, intent string, data interface{}) (string, error) {
-	if intent == "unknown" {
-		return "Sorry, I can't answer that question yet. Try asking about 'best sellers', 'highest sales', or 'peak hours'.", nil
-	}
-
+// formatResultsWithAI uses Gemini to create a human-readable response
+func formatResultsWithAI(originalPrompt string, queryResults []map[string]interface{}) (string, error) {
+	log.Printf("   🔍 [FORMAT] Creating AI client for formatting...")
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 	if err != nil {
+		log.Printf("   ❌ [FORMAT] Failed to create AI client: %v", err)
 		return "", fmt.Errorf("failed to create AI client: %w", err)
 	}
 	defer client.Close()
+	log.Printf("   ✅ [FORMAT] AI client created")
 
-	model := client.GenerativeModel("gemini-1.5-pro")
+	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize data: %w", err)
-	}
+	// Convert results to JSON string
+	resultsJSON, _ := json.Marshal(queryResults)
+	log.Printf("   📋 [FORMAT] Data size: %d bytes, %d rows", len(resultsJSON), len(queryResults))
 
-	analysisPrompt := fmt.Sprintf(
-		`You are a helpful AI assistant for a retail business. The user asked: "%s". The intent of the query was determined to be '%s'. Based on the following data, provide a concise and helpful analysis:
+	analysisPrompt := fmt.Sprintf(`
+User asked: "%s"
 
-		Data: %s`,
-		originalPrompt,
-		intent,
-		string(jsonData),
-	)
+Query returned this data:
+%s
 
+Provide a clear, concise, human-readable summary of these results that directly answers the user's question.
+Format the response in a friendly, professional manner. Include key insights and numbers.
+If the data is empty, explain that no data was found for the request.
+`, originalPrompt, string(resultsJSON))
+
+	log.Printf("   🔍 [FORMAT] Sending to Gemini for formatting...")
 	resp, err := model.GenerateContent(ctx, genai.Text(analysisPrompt))
 	if err != nil {
+		log.Printf("   ❌ [FORMAT] Gemini API error: %v", err)
 		return "", fmt.Errorf("failed to generate analysis: %w", err)
 	}
 
-	return fmt.Sprint(resp.Candidates[0].Content.Parts[0]), nil
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		log.Printf("   ⚠️  [FORMAT] No response from Gemini")
+		return "No analysis generated", nil
+	}
+
+	analysis := strings.TrimSpace(fmt.Sprint(resp.Candidates[0].Content.Parts[0]))
+	log.Printf("   ✅ [FORMAT] Analysis generated successfully (%d chars)", len(analysis))
+	return analysis, nil
 }

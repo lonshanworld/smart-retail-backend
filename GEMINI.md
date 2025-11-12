@@ -61,7 +61,7 @@ defer client.Close()
 This is the most basic use case: sending a text prompt and getting a text response.
 
 ```go
-model := client.GenerativeModel("gemini-1.5-pro")
+model := client.GenerativeModel("gemini-2.5-flash-lite")
 resp, err := model.GenerateContent(ctx, genai.Text("Tell me a story about a brave robot."))
 if err != nil {
     log.Fatal(err)
@@ -79,7 +79,7 @@ import "google.golang.org/genai"
 
 // ...
 
-model := client.GenerativeModel("gemini-1.5-pro")
+model := client.GenerativeModel("gemini-2.5-flash-lite")
 imgData, err := os.ReadFile("robot.jpg")
 if err != nil {
     log.Fatal(err)
@@ -101,7 +101,7 @@ printResponse(resp)
 For a conversational experience, use a chat session.
 
 ```go
-model := client.GenerativeModel("gemini-1.5-pro")
+model := client.GenerativeModel("gemini-2.5-flash-lite")
 cs := model.StartChat()
 
 // Send the first message

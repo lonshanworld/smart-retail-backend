@@ -9,3 +9,11 @@ func NullStringToStringPtr(ns sql.NullString) *string {
 	}
 	return nil
 }
+
+// PointerToString converts a string pointer to string, returning "<nil>" if the pointer is nil
+func PointerToString(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}

@@ -128,9 +128,31 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 // HandleCreateShop creates a new shop.
 // POST /api/v1/admin/shops
 func HandleCreateShop(c *fiber.Ctx) error {
+	// Log raw body for debugging
+	log.Printf("Raw request body: %s", string(c.Body()))
+
 	var req models.CreateShopRequest
 	if err := c.BodyParser(&req); err != nil {
+		log.Printf("Error parsing body: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Cannot parse JSON"})
+	}
+
+	log.Printf("Create shop request: name=%s, merchantId=%s, address=%v, phone=%v, isActive=%v, isPrimary=%v",
+		req.Name, req.MerchantID, req.Address, req.Phone, req.IsActive, req.IsPrimary)
+
+	// Convert empty strings to nil for optional fields
+	var addressVal interface{}
+	if req.Address != nil && *req.Address != "" {
+		addressVal = *req.Address
+	} else {
+		addressVal = nil
+	}
+
+	var phoneVal interface{}
+	if req.Phone != nil && *req.Phone != "" {
+		phoneVal = *req.Phone
+	} else {
+		phoneVal = nil
 	}
 
 	db := database.GetDB()
@@ -144,7 +166,7 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	var newShop models.Shop
 	var address, phone sql.NullString
 
-	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, req.Address, req.Phone, req.IsActive, req.IsPrimary).Scan(
+	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, addressVal, phoneVal, req.IsActive, req.IsPrimary).Scan(
 		&newShop.ID, &newShop.Name, &newShop.MerchantID, &address, &phone, &newShop.IsActive, &newShop.IsPrimary, &newShop.CreatedAt, &newShop.UpdatedAt,
 	)
 

@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetAssignedShop godoc
@@ -26,14 +26,16 @@ func HandleGetAssignedShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var user models.User
 	// First, get the user's assigned_shop_id
 	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
-	err := db.QueryRow(ctx, userQuery, userID).Scan(&user.AssignedShopID)
+	err = db.QueryRow(ctx, userQuery, userID).Scan(&user.AssignedShopID)
 	if err != nil || user.AssignedShopID == nil {
 		log.Printf("Error fetching assigned shop ID for user %s: %v", userID, err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found for this user"})
@@ -67,9 +69,11 @@ func HandleGetStaffProfile(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var user models.User
 	query := `
@@ -80,7 +84,7 @@ func HandleGetStaffProfile(c *fiber.Ctx) error {
         LEFT JOIN staff_contracts sc ON u.id = sc.staff_id
         WHERE u.id = $1
     `
-	err := db.QueryRow(ctx, query, userID).Scan(
+	err = db.QueryRow(ctx, query, userID).Scan(
 		&user.ID, &user.Name, &user.Email, &user.Role, &user.ShopName, &user.Salary, &user.PayFrequency,
 	)
 
@@ -107,14 +111,16 @@ func HandleGetSalaryHistory(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	staffID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	query := `SELECT id, staff_id, amount_paid, payment_date, notes FROM salary_payments WHERE staff_id = $1 ORDER BY payment_date DESC`
-	rows, err := db.Query(ctx, query, staffID)
+	rows, err := db.Query(ctx, query, userID)
 	if err != nil {
-		log.Printf("Error querying salary history for staff %s: %v", staffID, err)
+		log.Printf("Error querying salary history for staff %s: %v", userID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve salary history"})
 	}
 	defer rows.Close()
@@ -130,9 +136,9 @@ func HandleGetSalaryHistory(c *fiber.Ctx) error {
 	}
 
 	if err := rows.Err(); err != nil {
-        log.Printf("Error iterating salary rows: %v", err)
-        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to process salary history"})
-    }
+		log.Printf("Error iterating salary rows: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to process salary history"})
+	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": salaries})
 }

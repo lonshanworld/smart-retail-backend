@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetNotifications handles fetching a paginated list of notifications.
@@ -16,9 +16,11 @@ func HandleGetNotifications(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	recipientId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	recipientId := claims.UserID
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "20"))
@@ -27,7 +29,7 @@ func HandleGetNotifications(c *fiber.Ctx) error {
 	// Get total count
 	var totalCount int
 	countQuery := "SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1"
-	err := db.QueryRow(ctx, countQuery, recipientId).Scan(&totalCount)
+	err = db.QueryRow(ctx, countQuery, recipientId).Scan(&totalCount)
 	if err != nil {
 		log.Printf("Error counting notifications: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -74,17 +76,19 @@ func HandleGetNotifications(c *fiber.Ctx) error {
 }
 
 // HandleGetUnreadNotificationsCount handles fetching the count of unread notifications.
-func HandleGetUnreadNotificationsCount(c *fiber.Ctx) error {
+func HandleGetUnreadNotificationCount(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	recipientId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	recipientId := claims.UserID
 
 	var count int
 	query := "SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1 AND is_read = FALSE"
-	err := db.QueryRow(ctx, query, recipientId).Scan(&count)
+	err = db.QueryRow(ctx, query, recipientId).Scan(&count)
 	if err != nil {
 		log.Printf("Error counting unread notifications: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -98,9 +102,11 @@ func HandleMarkNotificationAsRead(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	recipientId := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	recipientId := claims.UserID
 	notificationId := c.Params("notificationId")
 
 	query := "UPDATE notifications SET is_read = TRUE, updated_at = NOW() WHERE id = $1 AND recipient_user_id = $2"
