@@ -127,6 +127,7 @@ func SetupRoutes(app *fiber.App) {
 	pos.Get("/products", handlers.HandleSearchProductsForPOS)
 	pos.Get("/promotions", handlers.HandleGetActivePromotionsForPOS)
 	pos.Post("/checkout", handlers.HandleCheckout)
+	pos.Post("/sync", handlers.HandleSyncOfflineSales)
 
 	customers := merchant.Group("/customers")
 	customers.Get("/search", handlers.HandleSearchCustomers)
