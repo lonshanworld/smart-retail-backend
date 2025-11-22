@@ -1,0 +1,53 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+smart-retail-backend
+
+# Build artifacts
+/build/
+/dist/
+
+# Dependencies
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*_test.go
+/test/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+README.md
+GEMINI.md
+
+# Database files (migrations should be included, but not local DBs)
+*.db
+*.sqlite
+
+# Environment files (provided via docker-compose)
+.env.local
+.env.production
+.env.development
+
+# Logs
+*.log
+
+# Coverage
+coverage.txt
+coverage.html
