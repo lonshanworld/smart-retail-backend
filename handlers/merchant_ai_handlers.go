@@ -77,8 +77,34 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 
 // generateSQLFromPrompt uses Gemini to convert natural language to SQL
 func generateSQLFromPrompt(prompt string, merchantID string) (string, error) {
-	log.Printf("   🔍 [SQL GEN] Creating AI client...")
+	log.Printf("   🔍 [SQL GEN] Fetching available tables from database...")
 	ctx := context.Background()
+	db := database.GetDB()
+
+	// Query actual table names from the database
+	tableRows, err := db.Query(ctx, `
+		SELECT table_name 
+		FROM information_schema.tables 
+		WHERE table_schema = 'public' 
+		AND table_type = 'BASE TABLE'
+		ORDER BY table_name
+	`)
+	if err != nil {
+		log.Printf("   ⚠️  [SQL GEN] Failed to fetch table names: %v", err)
+		// Continue with hardcoded schema as fallback
+	} else {
+		defer tableRows.Close()
+		var tableNames []string
+		for tableRows.Next() {
+			var tableName string
+			if err := tableRows.Scan(&tableName); err == nil {
+				tableNames = append(tableNames, tableName)
+			}
+		}
+		log.Printf("   ✅ [SQL GEN] Available tables: %v", tableNames)
+	}
+
+	log.Printf("   🔍 [SQL GEN] Creating AI client...")
 	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 	if err != nil {
 		log.Printf("   ❌ [SQL GEN] Failed to create AI client: %v", err)
@@ -89,17 +115,29 @@ func generateSQLFromPrompt(prompt string, merchantID string) (string, error) {
 
 	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
-	// Database schema information
+	// Database schema information (from actual schema.sql)
 	schemaInfo := `
 Database Schema:
-- sales (id, shop_id, merchant_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, created_at, updated_at)
+- users (id, name, email, password_hash, phone, role, is_active, merchant_id, assigned_shop_id, created_at, updated_at)
+- shops (id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at)
+- staff_contracts (id, staff_id, salary, pay_frequency, start_date, end_date, is_active, created_at, updated_at)
+- suppliers (id, merchant_id, name, contact_name, contact_email, contact_phone, address, notes, created_at, updated_at)
+- inventory_items (id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at)
+- shop_stock (id, shop_id, inventory_item_id, quantity, last_stocked_in_at)
+- stock_movements (id, inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason, movement_date, notes)
+- shop_customers (id, shop_id, merchant_id, name, email, phone, created_at, updated_at)
+- promotions (id, merchant_id, shop_id, name, description, promo_type, promo_value, min_spend, start_date, end_date, is_active, created_at, updated_at)
+- promotion_products (promotion_id, inventory_item_id)
+- sales (id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at)
 - sale_items (id, sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
-- inventory_items (id, merchant_id, name, sku, description, category, original_price, selling_price, created_at, updated_at)
-- shops (id, merchant_id, name, address, phone, created_at, updated_at)
-- shop_stocks (shop_id, inventory_item_id, stock_level, reorder_point, last_restocked, created_at, updated_at)
-- promotions (id, merchant_id, name, description, discount_percentage, min_spend, start_date, end_date, is_active, created_at, updated_at)
-- customers (id, merchant_id, name, email, phone, total_spent, created_at, updated_at)
-- staff (id, merchant_id, shop_id, name, email, role, created_at, updated_at)
+- salary_payments (id, staff_id, payment_date, amount_paid, payment_period_start, payment_period_end, payment_method, notes, created_at)
+- notifications (id, recipient_user_id, title, message, notification_type, related_entity_type, related_entity_id, is_read, created_at)
+
+CRITICAL - Table naming (use EXACT names from schema):
+- Use "shop_stock" (SINGULAR), NOT "shop_stocks"
+- Use "shop_customers" (plural), NOT "customers"
+- Use "inventory_items" (plural), NOT "inventory"
+- Use "sale_items" (plural), NOT "sale_item"
 
 Important:
 - The merchant_id for this query is: '` + merchantID + `'

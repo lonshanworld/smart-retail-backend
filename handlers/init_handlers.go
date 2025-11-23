@@ -22,7 +22,17 @@ func HandleInitializeAdmin(c *fiber.Ctx) error {
 	}
 
 	providedToken := c.Get("X-Init-Token")
+	// Log masked token attempts for debugging (do not log full token)
+	maskToken := func(t string) string {
+		if len(t) <= 8 {
+			return "****"
+		}
+		return t[:4] + "..." + t[len(t)-4:]
+	}
+	log.Printf("Init endpoint called. Provided token: %s", maskToken(providedToken))
+
 	if providedToken != initToken {
+		log.Printf("Init attempt with invalid token: %s", maskToken(providedToken))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Invalid initialization token",
@@ -37,30 +47,37 @@ func HandleInitializeAdmin(c *fiber.Ctx) error {
 	}
 
 	if err := c.BodyParser(&req); err != nil {
+		log.Printf("Init request body parse error: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Invalid request body",
 		})
 	}
 
-	// Check if any admin exists
-	var count int
+	// Log who is being created (do NOT log password)
+	log.Printf("Init payload received. name=%s, email=%s", req.Name, req.Email)
+
+	// Check if a user with this email already exists (any role)
+	var existingCount int
 	err := database.GetDB().QueryRow(c.Context(),
-		"SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
+		"SELECT COUNT(*) FROM users WHERE email = $1", req.Email).Scan(&existingCount)
 	if err != nil {
-		log.Printf("Database error checking admin count: %v", err)
+		log.Printf("Database error checking email uniqueness: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Database error",
 		})
 	}
 
-	if count > 0 {
+	if existingCount > 0 {
+		log.Printf("Init aborted: user with email %s already exists", req.Email)
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"status":  "error",
-			"message": "Admin user already exists",
+			"message": "User with this email already exists",
 		})
 	}
+
+	log.Printf("Email %s is unique. Proceeding to create admin.", req.Email)
 
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
