@@ -164,6 +164,68 @@ func HandleShopLogin(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"accessToken": token, "user": user, "shop": shop})
 }
 
+// HandleMerchantSignup allows a merchant to self-register without requiring a JWT.
+// Public endpoint: POST /api/v1/auth/signup
+func HandleMerchantSignup(c *fiber.Ctx) error {
+	var req struct {
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Cannot parse JSON"})
+	}
+
+	if req.Name == "" || req.Email == "" || req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "name, email and password are required"})
+	}
+
+	// Check if email already exists
+	var existingCount int
+	err := database.GetDB().QueryRow(c.Context(), "SELECT COUNT(*) FROM users WHERE email = $1", req.Email).Scan(&existingCount)
+	if err != nil {
+		log.Printf("Database error checking email uniqueness during signup: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	if existingCount > 0 {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": "error", "message": "User with this email already exists"})
+	}
+
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Error hashing password during signup: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Error processing password"})
+	}
+
+	// Insert merchant user
+	var user models.User
+	err = database.GetDB().QueryRow(c.Context(),
+		`INSERT INTO users (name, email, password_hash, role, is_active)
+         VALUES ($1, $2, $3, 'merchant', true)
+         RETURNING id, name, email, role, is_active, created_at, updated_at`,
+		req.Name, req.Email, string(hashedPassword),
+	).Scan(
+		&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+
+	if err != nil {
+		log.Printf("Error creating merchant user during signup: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Error creating user"})
+	}
+
+	// Create JWT token for the newly created merchant so frontend can be auto-logged-in
+	token, err := createJWT(user.ID, user.Role)
+	if err != nil {
+		log.Printf("Error creating JWT for new merchant %s: %v", user.ID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Could not create access token"})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"accessToken": token, "user": user})
+}
+
 // --- Helper Functions ---
 
 func createJWT(userID, role string) (string, error) {

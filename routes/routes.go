@@ -18,6 +18,8 @@ func SetupRoutes(app *fiber.App) {
 	auth := api.Group("/auth")
 	auth.Post("/login", handlers.HandleLogin)
 	auth.Post("/shop-login", handlers.HandleShopLogin)
+	// Public merchant signup (no JWT required)
+	auth.Post("/signup", handlers.HandleMerchantSignup)
 
 	// --- Admin Routes ---
 	admin := api.Group("/admin", middleware.JWTMiddleware, middleware.AdminRequired)
