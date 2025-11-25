@@ -207,6 +207,26 @@ type Sale struct {
 	Items                 []SaleItem `json:"items,omitempty"`
 }
 
+// Invoice represents an invoice generated for a sale.
+type Invoice struct {
+	ID             string     `json:"id"`
+	SaleID         string     `json:"saleId"`
+	InvoiceNumber  string     `json:"invoiceNumber"`
+	MerchantID     string     `json:"merchantId"`
+	ShopID         string     `json:"shopId"`
+	CustomerID     *string    `json:"customerId,omitempty"`
+	InvoiceDate    time.Time  `json:"invoiceDate"`
+	DueDate        *time.Time `json:"dueDate,omitempty"`
+	Subtotal       float64    `json:"subtotal"`
+	DiscountAmount float64    `json:"discountAmount"`
+	TaxAmount      float64    `json:"taxAmount"`
+	TotalAmount    float64    `json:"totalAmount"`
+	PaymentStatus  string     `json:"paymentStatus"`
+	Notes          *string    `json:"notes,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
 // SaleItem is an individual item within a Sale.
 type SaleItem struct {
 	ID                  string    `json:"id"`
@@ -351,6 +371,12 @@ type AdminPaginatedUsersResponse struct {
 // PaginatedSalesResponse for sales history.
 type PaginatedSalesResponse struct {
 	Items      []Sale     `json:"items"`
+	Pagination Pagination `json:"pagination"`
+}
+
+// PaginatedInvoicesResponse for invoices.
+type PaginatedInvoicesResponse struct {
+	Items      []Invoice  `json:"items"`
 	Pagination Pagination `json:"pagination"`
 }
 

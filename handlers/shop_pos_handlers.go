@@ -4,6 +4,7 @@ import (
 	"app/database"
 	"app/middleware"
 	"app/models"
+	"app/utils"
 	"context"
 	"fmt"
 	"log"
@@ -128,6 +129,34 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": fmt.Sprintf("Error processing item %s", item.ProductID)})
 		}
 	}
+
+	// Generate invoice number and create invoice
+	invoiceNumber, err := utils.GenerateInvoiceNumber(ctx, tx)
+	if err != nil {
+		log.Printf("Error generating invoice number: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to generate invoice number"})
+	}
+
+	// Calculate invoice amounts (req already has totalAmount)
+	subtotal := req.TotalAmount + req.DiscountAmount
+	taxAmount := 0.0 // Implement tax calculation if needed
+
+	invoiceQuery := `
+		INSERT INTO invoices (
+			sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err = tx.Exec(ctx, invoiceQuery,
+		saleID, invoiceNumber, merchantID, shopID, req.CustomerID,
+		time.Now(), subtotal, req.DiscountAmount, taxAmount, req.TotalAmount, "paid",
+	)
+	if err != nil {
+		log.Printf("Error creating invoice: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
+	}
+
+	log.Printf("Created invoice %s for sale %s", invoiceNumber, saleID)
 
 	if err := tx.Commit(ctx); err != nil {
 		log.Printf("Error committing transaction: %v", err)

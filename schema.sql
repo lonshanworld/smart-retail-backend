@@ -176,6 +176,26 @@ CREATE TABLE IF NOT EXISTS sale_items (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Invoices generated for sales
+CREATE TABLE IF NOT EXISTS invoices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sale_id UUID NOT NULL UNIQUE REFERENCES sales(id) ON DELETE CASCADE,
+    invoice_number VARCHAR(50) NOT NULL UNIQUE,
+    merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    shop_id UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
+    customer_id UUID REFERENCES shop_customers(id) ON DELETE SET NULL,
+    invoice_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    due_date TIMESTAMP WITH TIME ZONE,
+    subtotal NUMERIC(10, 2) NOT NULL,
+    discount_amount NUMERIC(10, 2) DEFAULT 0.00,
+    tax_amount NUMERIC(10, 2) DEFAULT 0.00,
+    total_amount NUMERIC(10, 2) NOT NULL,
+    payment_status VARCHAR(50) NOT NULL DEFAULT 'paid', -- 'paid', 'pending', 'overdue', 'cancelled'
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Salary payments made to staff
 CREATE TABLE IF NOT EXISTS salary_payments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

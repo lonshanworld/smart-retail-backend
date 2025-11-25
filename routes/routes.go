@@ -153,6 +153,12 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
 	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
 
+	// Merchant Invoices
+	invoices := merchant.Group("/invoices")
+	invoices.Get("/", handlers.HandleListInvoices)
+	invoices.Get("/:invoiceId", handlers.HandleGetInvoiceByID)
+	invoices.Get("/sale/:saleId", handlers.HandleGetInvoiceBySaleID)
+
 	// --- Staff Routes ---
 	staff := api.Group("/staff", middleware.JWTMiddleware, middleware.StaffRequired)
 	staff.Get("/dashboard/summary", handlers.HandleGetStaffDashboardSummary)

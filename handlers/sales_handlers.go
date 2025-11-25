@@ -3,8 +3,10 @@ package handlers
 import (
 	"app/database"
 	"app/models"
+	"app/utils"
 	"context"
 	"log"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -66,6 +68,46 @@ func HandleCreateSale(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale item"})
 		}
 	}
+
+	// Generate invoice number and create invoice
+	invoiceNumber, err := utils.GenerateInvoiceNumber(ctx, tx)
+	if err != nil {
+		log.Printf("Error generating invoice number: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to generate invoice number"})
+	}
+
+	// Get merchant_id from sale
+	var merchantID string
+	merchantQuery := "SELECT merchant_id FROM sales WHERE id = $1"
+	if err := tx.QueryRow(ctx, merchantQuery, sale.ID).Scan(&merchantID); err != nil {
+		log.Printf("Error fetching merchant_id: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to fetch merchant data"})
+	}
+
+	// Calculate invoice amounts
+	discountAmount := 0.0
+	if sale.DiscountAmount != nil {
+		discountAmount = *sale.DiscountAmount
+	}
+	subtotal := totalAmount + discountAmount
+	taxAmount := 0.0 // You can implement tax calculation logic here if needed
+
+	invoiceQuery := `
+		INSERT INTO invoices (
+			sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err = tx.Exec(ctx, invoiceQuery,
+		sale.ID, invoiceNumber, merchantID, input.ShopID, nil,
+		time.Now(), subtotal, discountAmount, taxAmount, totalAmount, "paid",
+	)
+	if err != nil {
+		log.Printf("Error creating invoice: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
+	}
+
+	log.Printf("Created invoice %s for sale %s", invoiceNumber, sale.ID)
 
 	if err := tx.Commit(ctx); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
