@@ -29,9 +29,13 @@ CREATE TABLE IF NOT EXISTS shops (
     is_active BOOLEAN DEFAULT TRUE,
     is_primary BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (merchant_id, is_primary) WHERE is_primary = TRUE
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Create partial unique index for primary shop constraint
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shops_merchant_primary 
+ON shops (merchant_id) 
+WHERE is_primary = TRUE;
 
 -- Now that shops table exists, add the foreign key constraint to users
 ALTER TABLE users ADD CONSTRAINT fk_assigned_shop_id FOREIGN KEY (assigned_shop_id) REFERENCES shops(id) ON DELETE SET NULL;
