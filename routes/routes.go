@@ -175,6 +175,9 @@ func SetupRoutes(app *fiber.App) {
 	// --- Staff Items Routes ---
 	staffItems := staff.Group("/items")
 	staffItems.Get("/", handlers.HandleGetStaffItems)
+	staffInvoices := staff.Group("/invoices")
+	staffInvoices.Get("/", handlers.HandleListStaffInvoices)
+	staffInvoices.Get("/:invoiceId", handlers.HandleGetStaffInvoiceByID)
 
 	// --- Shop Routes ---
 	// Shop routes are accessible by both merchants (with shopId param) and staff (with assigned shop)
@@ -196,6 +199,11 @@ func SetupRoutes(app *fiber.App) {
 	// Shop sales routes (accessible by both merchant and staff)
 	shopSales := shop.Group("/shops/:shopId/sales")
 	shopSales.Get("/", handlers.HandleListSalesForShop)
+
+	// Shop invoices (accessible to merchant owners and staff assigned to the shop)
+	shopInvoices := shop.Group("/shops/:shopId/invoices")
+	shopInvoices.Get("/", handlers.HandleListShopInvoices)
+	shopInvoices.Get("/:invoiceId", handlers.HandleGetShopInvoiceByID)
 
 	// --- Shop POS Routes ---
 	shopPOS := shop.Group("/pos")
