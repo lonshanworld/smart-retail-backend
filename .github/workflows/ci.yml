@@ -1,0 +1,26 @@
+name: Backend CI (Go)
+
+on:
+  push:
+    paths:
+      - 'smart-retail-backend/**'
+  pull_request:
+    paths:
+      - 'smart-retail-backend/**'
+
+jobs:
+  go-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Run go tests
+        working-directory: ./smart-retail-backend
+        run: |
+          go test ./... -v

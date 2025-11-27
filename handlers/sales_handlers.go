@@ -171,8 +171,13 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 					log.Printf("⚠️ [SALES HANDLER] Error scanning sale item: %v", err)
 					continue
 				}
+				// OriginalPriceAtSale is a pointer; guard against nil when formatting.
+				orig := 0.0
+				if item.OriginalPriceAtSale != nil {
+					orig = *item.OriginalPriceAtSale
+				}
 				log.Printf("   📦 [SALES HANDLER] Item: %s, Qty: %d, SellingPrice: %.2f, OriginalPrice: %.2f, Subtotal: %.2f",
-					item.InventoryItemID, item.QuantitySold, item.SellingPriceAtSale, item.OriginalPriceAtSale, item.Subtotal)
+					item.InventoryItemID, item.QuantitySold, item.SellingPriceAtSale, orig, item.Subtotal)
 				items = append(items, item)
 			}
 			sale.Items = items
