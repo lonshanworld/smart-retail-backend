@@ -258,6 +258,53 @@ func HandleDeleteInventoryItem(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+// HandleCheckDeleteInventoryItem performs a preflight check to see if an inventory item can be safely deleted.
+// Returns { deletable: bool, blockers: {resourceName: count, ...} }
+func HandleCheckDeleteInventoryItem(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Unauthorized"})
+	}
+	merchantID := claims.UserID
+
+	itemID := c.Params("itemId")
+
+	// Verify item belongs to merchant
+	var exists int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_items WHERE id = $1 AND merchant_id = $2", itemID, merchantID).Scan(&exists); err != nil || exists == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Inventory item not found or access denied"})
+	}
+
+	blockers := map[string]int{}
+	var cnt int
+
+	// shop_stock
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shop_stock WHERE inventory_item_id = $1", itemID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["shop_stock"] = cnt
+	}
+
+	// stock_movements
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM stock_movements WHERE inventory_item_id = $1", itemID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["stock_movements"] = cnt
+	}
+
+	// sale_items
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sale_items WHERE inventory_item_id = $1", itemID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["sale_items"] = cnt
+	}
+
+	// promotion_products
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM promotion_products WHERE inventory_item_id = $1", itemID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["promotion_products"] = cnt
+	}
+
+	deletable := len(blockers) == 0
+	return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"deletable": deletable, "blockers": blockers}})
+}
+
 func HandleArchiveInventoryItem(c *fiber.Ctx) error {
 	return handleArchiveStatus(c, true)
 }

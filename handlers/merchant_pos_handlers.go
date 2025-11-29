@@ -4,6 +4,7 @@ import (
 	"app/database"
 	"app/middleware"
 	"app/models"
+	"app/utils"
 	"context"
 	"fmt"
 	"log"
@@ -384,10 +385,42 @@ func HandleCheckout(c *fiber.Ctx) error {
 		}
 	}
 
+	// Generate invoice number and create invoice (merchant POS should create an invoice)
+	invoiceNumber, err := utils.GenerateInvoiceNumber(ctx, tx)
+	if err != nil {
+		log.Printf("Error generating invoice number (merchant POS): %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to generate invoice number"})
+	}
+
+	// Calculate invoice amounts
+	discountAmount := req.DiscountAmount
+	subtotal := req.TotalAmount + discountAmount
+	taxAmount := 0.0
+
+	invoiceQuery := `
+		INSERT INTO invoices (
+			sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err = tx.Exec(ctx, invoiceQuery,
+		saleID, invoiceNumber, merchantID, req.ShopID, req.CustomerID,
+		time.Now(), subtotal, discountAmount, taxAmount, req.TotalAmount, "paid",
+	)
+	if err != nil {
+		log.Printf("Error creating invoice (merchant POS): %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
+			err, saleID, invoiceNumber, merchantID, req.ShopID, req.CustomerID, subtotal, discountAmount, taxAmount, req.TotalAmount)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		log.Printf("Failed to commit transaction: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to finalize sale"})
 	}
+
+	// Debug: note that this merchant POS checkout endpoint does not create an invoice
+	log.Printf("📄 [MERCHANT POS] Checkout committed for saleID=%s shopID=%s total=%.2f. (This handler does not create an invoice.)",
+		saleID, req.ShopID, req.TotalAmount)
 
 	// Re-fetch the created sale with its items to return to the client
 	createdSale, err := getSaleByID(ctx, db, saleID)
@@ -411,7 +444,7 @@ func getSaleByID(ctx context.Context, db *pgxpool.Pool, saleID string) (*models.
 		return nil, err
 	}
 
-	itemsQuery := `SELECT id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at FROM sale_items WHERE sale_id = $1`
+	itemsQuery := `SELECT id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, item_name, item_sku, created_at, updated_at FROM sale_items WHERE sale_id = $1`
 	rows, err := db.Query(ctx, itemsQuery, saleID)
 	if err != nil {
 		return nil, err
@@ -421,7 +454,7 @@ func getSaleByID(ctx context.Context, db *pgxpool.Pool, saleID string) (*models.
 	sale.Items = make([]models.SaleItem, 0)
 	for rows.Next() {
 		var item models.SaleItem
-		if err := rows.Scan(&item.ID, &item.SaleID, &item.InventoryItemID, &item.QuantitySold, &item.SellingPriceAtSale, &item.OriginalPriceAtSale, &item.Subtotal, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SaleID, &item.InventoryItemID, &item.QuantitySold, &item.SellingPriceAtSale, &item.OriginalPriceAtSale, &item.Subtotal, &item.ItemName, &item.ItemSKU, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		sale.Items = append(sale.Items, item)

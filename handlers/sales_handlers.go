@@ -59,11 +59,22 @@ func HandleCreateSale(c *fiber.Ctx) error {
 
 	// Create sale items
 	for _, item := range input.Items {
+		// fetch item details to denormalize into sale_items
+		var itemName string
+		var itemSKU *string
+		var originalPrice *float64
+		itemQuery := `SELECT name, sku, original_price FROM inventory_items WHERE id = $1`
+		if err := tx.QueryRow(ctx, itemQuery, item.InventoryItemID).Scan(&itemName, &itemSKU, &originalPrice); err != nil {
+			log.Printf("Error fetching inventory item details for %s: %v", item.InventoryItemID, err)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Product not found"})
+		}
+
 		saleItemQuery := `
-			INSERT INTO sale_items (sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO sale_items (sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		`
-		if _, err := tx.Exec(ctx, saleItemQuery, sale.ID, item.InventoryItemID, item.QuantitySold, item.SellingPriceAtSale, item.OriginalPriceAtSale, item.Subtotal); err != nil {
+		subtotal := float64(item.QuantitySold) * item.SellingPriceAtSale
+		if _, err := tx.Exec(ctx, saleItemQuery, sale.ID, item.InventoryItemID, itemName, itemSKU, item.QuantitySold, item.SellingPriceAtSale, originalPrice, subtotal); err != nil {
 			log.Printf("Error creating sale item: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale item"})
 		}
@@ -92,6 +103,10 @@ func HandleCreateSale(c *fiber.Ctx) error {
 	subtotal := totalAmount + discountAmount
 	taxAmount := 0.0 // You can implement tax calculation logic here if needed
 
+	// Debug logging: show invoice parameters before insert
+	log.Printf("📄 [SALES HANDLER] Preparing invoice: invoiceNumber=%s, saleID=%s, shopID=%s, subtotal=%.2f, discount=%.2f, tax=%.2f, total=%.2f",
+		invoiceNumber, sale.ID, input.ShopID, subtotal, discountAmount, taxAmount, totalAmount)
+
 	invoiceQuery := `
 		INSERT INTO invoices (
 			sale_id, invoice_number, merchant_id, shop_id, customer_id,
@@ -103,7 +118,8 @@ func HandleCreateSale(c *fiber.Ctx) error {
 		time.Now(), subtotal, discountAmount, taxAmount, totalAmount, "paid",
 	)
 	if err != nil {
-		log.Printf("Error creating invoice: %v", err)
+		log.Printf("Error creating invoice: %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
+			err, sale.ID, invoiceNumber, merchantID, input.ShopID, nil, subtotal, discountAmount, taxAmount, totalAmount)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
 	}
 
@@ -153,7 +169,7 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 
 		// Fetch sale items for this sale
 		itemsQuery := `
-			SELECT id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal
+			SELECT id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, item_name, item_sku
 			FROM sale_items
 			WHERE sale_id = $1
 		`
@@ -167,7 +183,7 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 			var items []models.SaleItem
 			for itemRows.Next() {
 				var item models.SaleItem
-				if err := itemRows.Scan(&item.ID, &item.SaleID, &item.InventoryItemID, &item.QuantitySold, &item.SellingPriceAtSale, &item.OriginalPriceAtSale, &item.Subtotal); err != nil {
+				if err := itemRows.Scan(&item.ID, &item.SaleID, &item.InventoryItemID, &item.QuantitySold, &item.SellingPriceAtSale, &item.OriginalPriceAtSale, &item.Subtotal, &item.ItemName, &item.ItemSKU); err != nil {
 					log.Printf("⚠️ [SALES HANDLER] Error scanning sale item: %v", err)
 					continue
 				}

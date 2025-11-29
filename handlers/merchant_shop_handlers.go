@@ -227,3 +227,60 @@ func HandleSetPrimaryShop(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "success", "data": shop})
 }
+
+// HandleCheckDeleteMerchantShop performs a preflight check to see if a shop can be safely deleted.
+// Returns { deletable: bool, blockers: {resourceName: count, ...} }
+func HandleCheckDeleteMerchantShop(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	user := c.Locals("user").(*jwt.Token)
+	claims := user.Claims.(*models.JwtClaims)
+	merchantID := claims.UserID
+
+	shopID := c.Params("shopId")
+
+	// Verify shop belongs to merchant
+	var exists int
+	checkQuery := "SELECT COUNT(*) FROM shops WHERE id = $1 AND merchant_id = $2"
+	if err := db.QueryRow(ctx, checkQuery, shopID, merchantID).Scan(&exists); err != nil || exists == 0 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Shop not found or access denied"})
+	}
+
+	blockers := map[string]int{}
+
+	// Count sales referencing this shop
+	var cnt int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["sales"] = cnt
+	}
+
+	// Count shop_stock rows
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shop_stock WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["shop_stock"] = cnt
+	}
+
+	// Count stock_movements rows
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM stock_movements WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["stock_movements"] = cnt
+	}
+
+	// Count shop_customers
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shop_customers WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["shop_customers"] = cnt
+	}
+
+	// Count promotions referencing this shop
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM promotions WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["promotions"] = cnt
+	}
+
+	// Count users assigned to this shop
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE assigned_shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["assigned_users"] = cnt
+	}
+
+	deletable := len(blockers) == 0
+
+	return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"deletable": deletable, "blockers": blockers}})
+}

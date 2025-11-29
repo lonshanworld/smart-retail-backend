@@ -225,6 +225,7 @@ type Invoice struct {
 	Notes          *string    `json:"notes,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
+	Items          []SaleItem `json:"items,omitempty"`
 }
 
 // SaleItem is an individual item within a Sale.

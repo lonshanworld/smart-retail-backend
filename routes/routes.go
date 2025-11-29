@@ -75,6 +75,8 @@ func SetupRoutes(app *fiber.App) {
 	merchantShops.Put("/:shopId", handlers.HandleUpdateMerchantShop)
 	merchantShops.Delete("/:shopId", handlers.HandleDeleteMerchantShop)
 	merchantShops.Get("/:shopId/products", handlers.HandleListProductsForShop)
+	// Deletion preflight check (does not perform delete) - returns blockers and deletable flag
+	merchantShops.Get("/:shopId/delete-check", handlers.HandleCheckDeleteMerchantShop)
 	merchantShops.Patch("/:shopId/set-primary", handlers.HandleSetPrimaryShop)
 	merchantShops.Get("/:shopId/inventory", handlers.HandleListInventoryForShop)
 	merchantShops.Post("/:shopId/stock-in", handlers.HandleShopStockIn)
@@ -109,6 +111,7 @@ func SetupRoutes(app *fiber.App) {
 	merchantStaff.Get("/", handlers.HandleListMerchantStaff)
 	merchantStaff.Post("/", handlers.HandleCreateMerchantStaff)
 	merchantStaff.Put("/:staffId", handlers.HandleUpdateMerchantStaff)
+	merchantStaff.Get("/:staffId/delete-check", handlers.HandleCheckDeleteMerchantStaff)
 	merchantStaff.Delete("/:staffId", handlers.HandleDeleteMerchantStaff)
 
 	// Merchant Stocks
@@ -150,6 +153,7 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Get("/:itemId", handlers.HandleGetInventoryItemByID)
 	inventory.Put("/:itemId", handlers.HandleUpdateInventoryItem)
 	inventory.Delete("/:itemId", handlers.HandleDeleteInventoryItem)
+	inventory.Get("/:itemId/delete-check", handlers.HandleCheckDeleteInventoryItem)
 	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
 	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
 
@@ -204,6 +208,13 @@ func SetupRoutes(app *fiber.App) {
 	shopInvoices := shop.Group("/shops/:shopId/invoices")
 	shopInvoices.Get("/", handlers.HandleListShopInvoices)
 	shopInvoices.Get("/:invoiceId", handlers.HandleGetShopInvoiceByID)
+
+	// --- Dashboard-only shop endpoints (infer shop from auth for staff dashboard) ---
+	dashboard := api.Group("/dashboard", middleware.JWTMiddleware)
+	dashboardShop := dashboard.Group("/shop")
+	dashboardShop.Get("/sales", handlers.HandleDashboardListSales)
+	dashboardShop.Get("/items", handlers.HandleDashboardGetItems)
+	dashboardShop.Get("/customers/search", handlers.HandleDashboardSearchCustomers)
 
 	// --- Shop POS Routes ---
 	shopPOS := shop.Group("/pos")

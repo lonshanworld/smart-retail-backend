@@ -185,12 +185,28 @@ func HandleGetStaffItems(c *fiber.Ctx) error {
 	items := []models.InventoryItem{}
 	for rows.Next() {
 		var item models.InventoryItem
-		var quantity int
-		err := rows.Scan(&item.ID, &item.MerchantID, &item.Name, &item.SKU, &item.SellingPrice, &item.OriginalPrice, &quantity, &item.MerchantID, &item.CreatedAt, &item.UpdatedAt)
+		var stock models.ShopStock
+		// scan in the same order as the SELECT statement
+		err := rows.Scan(
+			&item.ID,
+			&item.MerchantID,
+			&item.Name,
+			&item.SKU,
+			&item.SellingPrice,
+			&item.OriginalPrice,
+			&stock.Quantity,
+			&stock.ShopID,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		)
 		if err != nil {
 			log.Printf("Error scanning item row: %v", err)
 			continue
 		}
+		// Populate stock fields that were not selected
+		stock.InventoryItemID = item.ID
+		// leave stock.ID empty when not selected
+		item.Stock = &stock
 		items = append(items, item)
 	}
 

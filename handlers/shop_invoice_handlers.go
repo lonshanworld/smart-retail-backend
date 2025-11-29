@@ -98,6 +98,44 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 			log.Printf("Error scanning invoice: %v", err)
 			continue
 		}
+
+		// Fetch sale items for this invoice to include in response (denormalized name/sku if available)
+		itemsQuery := `
+			SELECT si.id, si.sale_id, si.inventory_item_id, si.quantity_sold, si.selling_price_at_sale,
+				   si.original_price_at_sale, si.subtotal, si.created_at, si.updated_at,
+				   COALESCE(si.item_name, ii.name) as item_name,
+				   COALESCE(si.item_sku, ii.sku) as item_sku
+			FROM sale_items si
+			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			WHERE si.sale_id = $1
+		`
+
+		itemRows, err := db.Query(ctx, itemsQuery, inv.SaleID)
+		if err != nil {
+			log.Printf("Error querying sale items for invoice %s: %v", inv.ID, err)
+			inv.Items = []models.SaleItem{}
+		} else {
+			defer itemRows.Close()
+			var items []models.SaleItem
+			for itemRows.Next() {
+				var si models.SaleItem
+				var original sql.NullFloat64
+				if err := itemRows.Scan(
+					&si.ID, &si.SaleID, &si.InventoryItemID, &si.QuantitySold, &si.SellingPriceAtSale,
+					&original, &si.Subtotal, &si.CreatedAt, &si.UpdatedAt, &si.ItemName, &si.ItemSKU,
+				); err != nil {
+					log.Printf("Error scanning sale item: %v", err)
+					continue
+				}
+				if original.Valid {
+					v := original.Float64
+					si.OriginalPriceAtSale = &v
+				}
+				items = append(items, si)
+			}
+			inv.Items = items
+		}
+
 		invoices = append(invoices, inv)
 	}
 
@@ -159,6 +197,41 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 	// If shopId was provided in path, ensure it matches invoice
 	if shopId != "" && inv.ShopID != shopId {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "invoice does not belong to shop"})
+	}
+
+	// Fetch sale items for this invoice
+	itemsQuery := `
+			SELECT si.id, si.sale_id, si.inventory_item_id, si.quantity_sold, si.selling_price_at_sale,
+				   si.original_price_at_sale, si.subtotal, si.created_at, si.updated_at,
+				   COALESCE(si.item_name, ii.name) as item_name,
+				   COALESCE(si.item_sku, ii.sku) as item_sku
+			FROM sale_items si
+			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			WHERE si.sale_id = $1
+		`
+	rows, err := db.Query(ctx, itemsQuery, inv.SaleID)
+	if err != nil {
+		log.Printf("Error querying sale items for invoice %s: %v", inv.ID, err)
+	} else {
+		defer rows.Close()
+		var items []models.SaleItem
+		for rows.Next() {
+			var si models.SaleItem
+			var original sql.NullFloat64
+			if err := rows.Scan(
+				&si.ID, &si.SaleID, &si.InventoryItemID, &si.QuantitySold, &si.SellingPriceAtSale,
+				&original, &si.Subtotal, &si.CreatedAt, &si.UpdatedAt, &si.ItemName, &si.ItemSKU,
+			); err != nil {
+				log.Printf("Error scanning sale item: %v", err)
+				continue
+			}
+			if original.Valid {
+				v := original.Float64
+				si.OriginalPriceAtSale = &v
+			}
+			items = append(items, si)
+		}
+		inv.Items = items
 	}
 
 	// Authorization similar to list handler
@@ -326,6 +399,41 @@ func HandleGetStaffInvoiceByID(c *fiber.Ctx) error {
 	}
 	if assignedShopID == nil || *assignedShopID != inv.ShopID {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Staff not authorized for this shop"})
+	}
+
+	// Fetch sale items for this invoice
+	itemsQuery := `
+			SELECT si.id, si.sale_id, si.inventory_item_id, si.quantity_sold, si.selling_price_at_sale,
+				   si.original_price_at_sale, si.subtotal, si.created_at, si.updated_at,
+				   COALESCE(si.item_name, ii.name) as item_name,
+				   COALESCE(si.item_sku, ii.sku) as item_sku
+			FROM sale_items si
+			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			WHERE si.sale_id = $1
+		`
+	rows, err := db.Query(ctx, itemsQuery, inv.SaleID)
+	if err != nil {
+		log.Printf("Error querying sale items for invoice %s: %v", inv.ID, err)
+	} else {
+		defer rows.Close()
+		var items []models.SaleItem
+		for rows.Next() {
+			var si models.SaleItem
+			var original sql.NullFloat64
+			if err := rows.Scan(
+				&si.ID, &si.SaleID, &si.InventoryItemID, &si.QuantitySold, &si.SellingPriceAtSale,
+				&original, &si.Subtotal, &si.CreatedAt, &si.UpdatedAt, &si.ItemName, &si.ItemSKU,
+			); err != nil {
+				log.Printf("Error scanning sale item: %v", err)
+				continue
+			}
+			if original.Valid {
+				v := original.Float64
+				si.OriginalPriceAtSale = &v
+			}
+			items = append(items, si)
+		}
+		inv.Items = items
 	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": inv})

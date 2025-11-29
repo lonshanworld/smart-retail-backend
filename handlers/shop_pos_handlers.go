@@ -141,6 +141,10 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	subtotal := req.TotalAmount + req.DiscountAmount
 	taxAmount := 0.0 // Implement tax calculation if needed
 
+	// Debug logging: show invoice parameters before insert
+	log.Printf("📄 [SHOP POS] Preparing invoice: invoiceNumber=%s, saleID=%s, shopID=%s, subtotal=%.2f, discount=%.2f, tax=%.2f, total=%.2f",
+		invoiceNumber, saleID, shopID, subtotal, req.DiscountAmount, taxAmount, req.TotalAmount)
+
 	invoiceQuery := `
 		INSERT INTO invoices (
 			sale_id, invoice_number, merchant_id, shop_id, customer_id,
@@ -152,7 +156,8 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 		time.Now(), subtotal, req.DiscountAmount, taxAmount, req.TotalAmount, "paid",
 	)
 	if err != nil {
-		log.Printf("Error creating invoice: %v", err)
+		log.Printf("Error creating invoice: %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
+			err, saleID, invoiceNumber, merchantID, shopID, req.CustomerID, subtotal, req.DiscountAmount, taxAmount, req.TotalAmount)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
 	}
 
@@ -209,14 +214,17 @@ func processSaleItem(ctx context.Context, tx pgx.Tx, saleID, shopID, staffID str
 	}
 
 	stockUpdateQuery := `
-        UPDATE shop_stock
-        SET quantity = quantity - $1
-        WHERE shop_id = $2 AND inventory_item_id = $3
-        RETURNING quantity
-    `
+		UPDATE shop_stock
+		SET quantity = quantity - $1
+		WHERE shop_id = $2 AND inventory_item_id = $3 AND quantity >= $1
+		RETURNING quantity
+	`
 	var newQuantity int
 	err = tx.QueryRow(ctx, stockUpdateQuery, item.Quantity, shopID, item.ProductID).Scan(&newQuantity)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return fmt.Errorf("insufficient stock for product %s", item.ProductID)
+		}
 		return fmt.Errorf("could not update stock for item %s: %w", item.ProductID, err)
 	}
 

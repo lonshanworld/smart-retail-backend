@@ -262,3 +262,45 @@ func HandleDeleteMerchantStaff(c *fiber.Ctx) error {
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success"})
 }
+
+// HandleCheckDeleteMerchantStaff performs a preflight check to see if a staff member can be safely deleted.
+// Returns { deletable: bool, blockers: {resourceName: count, ...} }
+func HandleCheckDeleteMerchantStaff(c *fiber.Ctx) error {
+	db := database.GetDB()
+	ctx := context.Background()
+
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Unauthorized"})
+	}
+	merchantId := claims.UserID
+
+	staffId := c.Params("staffId")
+
+	// Verify staff belongs to merchant
+	var exists int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE id = $1 AND merchant_id = $2 AND role = 'staff'", staffId, merchantId).Scan(&exists); err != nil || exists == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Staff member not found or access denied"})
+	}
+
+	blockers := map[string]int{}
+	var cnt int
+
+	// Check stock_movements by this user
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM stock_movements WHERE user_id = $1", staffId).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["stock_movements"] = cnt
+	}
+
+	// Check sales recorded by this staff
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales WHERE staff_id = $1", staffId).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["sales"] = cnt
+	}
+
+	// Check salary payments
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM salary_payments WHERE staff_id = $1", staffId).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["salary_payments"] = cnt
+	}
+
+	deletable := len(blockers) == 0
+	return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"deletable": deletable, "blockers": blockers}})
+}

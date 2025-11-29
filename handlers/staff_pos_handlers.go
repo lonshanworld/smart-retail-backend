@@ -4,11 +4,14 @@ import (
 	"app/database"
 	"app/middleware"
 	"app/models"
+	"app/utils"
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleSearchProductsForStaff godoc
@@ -165,22 +168,20 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 		}
 
 		updateStockQuery := `
-            UPDATE shop_stock
-            SET quantity = quantity - $1
-            WHERE shop_id = $2 AND inventory_item_id = $3
-        `
-		_, err = tx.Exec(ctx, updateStockQuery, item.Quantity, assignedShopID, item.ProductID)
+			UPDATE shop_stock
+			SET quantity = quantity - $1
+			WHERE shop_id = $2 AND inventory_item_id = $3 AND quantity >= $1
+			RETURNING quantity
+		`
+		var currentQuantity int
+		err = tx.QueryRow(ctx, updateStockQuery, item.Quantity, assignedShopID, item.ProductID).Scan(&currentQuantity)
 		if err != nil {
+			if err == pgx.ErrNoRows {
+				log.Printf("Insufficient stock for product %s", item.ProductID)
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": "error", "message": fmt.Sprintf("Insufficient stock for product %s", item.ProductID)})
+			}
 			log.Printf("Error updating stock: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update stock"})
-		}
-
-		var currentQuantity int
-		stockQuery := `SELECT quantity FROM shop_stock WHERE shop_id = $1 AND inventory_item_id = $2`
-		err = tx.QueryRow(ctx, stockQuery, assignedShopID, item.ProductID).Scan(&currentQuantity)
-		if err != nil {
-			log.Printf("Error getting current stock quantity: %v", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to get current stock quantity"})
 		}
 
 		stockMovementQuery := `
@@ -192,6 +193,34 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 			log.Printf("Error creating stock movement: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create stock movement"})
 		}
+	}
+
+	// Generate invoice number and create invoice for staff POS
+	invoiceNumber, err := utils.GenerateInvoiceNumber(ctx, tx)
+	if err != nil {
+		log.Printf("Error generating invoice number (staff POS): %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to generate invoice number"})
+	}
+
+	// Staff checkout doesn't include discount field; set to 0
+	discountAmount := 0.0
+	subtotal := req.TotalAmount + discountAmount
+	taxAmount := 0.0
+
+	invoiceQuery := `
+		INSERT INTO invoices (
+			sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err = tx.Exec(ctx, invoiceQuery,
+		sale.ID, invoiceNumber, merchantID, assignedShopID, req.CustomerID,
+		time.Now(), subtotal, discountAmount, taxAmount, req.TotalAmount, "paid",
+	)
+	if err != nil {
+		log.Printf("Error creating invoice (staff POS): %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
+			err, sale.ID, invoiceNumber, merchantID, assignedShopID, req.CustomerID, subtotal, discountAmount, taxAmount, req.TotalAmount)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create invoice"})
 	}
 
 	if err := tx.Commit(ctx); err != nil {
