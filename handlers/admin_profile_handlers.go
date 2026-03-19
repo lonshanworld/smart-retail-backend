@@ -28,6 +28,27 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid JSON"})
 	}
 
+	clientOperationID, _ := updates["clientOperationId"].(string)
+	if clientOperationID == "" {
+		clientOperationID, _ = updates["client_operation_id"].(string)
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_update_profile", userID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return HandleGetAdminProfile(c)
+	}
+
 	var setParts []string
 	var args []interface{}
 	argId := 1
@@ -65,8 +86,7 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 
 	var updatedUser models.User
 	var phone, assignedShopID, merchantID sql.NullString
-
-	err := db.QueryRow(ctx, query, args...).Scan(
+	err = tx.QueryRow(ctx, query, args...).Scan(
 		&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Role, &updatedUser.IsActive,
 		&phone, &assignedShopID, &merchantID,
 		&updatedUser.CreatedAt, &updatedUser.UpdatedAt,
@@ -85,6 +105,10 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 	}
 	if merchantID.Valid {
 		updatedUser.MerchantID = &merchantID.String
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit operation"})
 	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": updatedUser})

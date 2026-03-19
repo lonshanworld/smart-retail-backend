@@ -1,4 +1,3 @@
-
 package handlers
 
 import (
@@ -48,10 +47,15 @@ func HandleGetShopProfile(c *fiber.Ctx) error {
 
 	// 2. If user is assigned to a shop, fetch shop details
 	if user.AssignedShopID != nil && *user.AssignedShopID != "" {
-		shopQuery := `SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE id = $1`
+		shopQuery := `
+			SELECT s.id, s.name, s.merchant_id, s.address, s.phone, s.is_active, s.is_primary,
+			       COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
+			FROM shops s
+			LEFT JOIN payment_settings ps ON ps.shop_id = s.id
+			WHERE s.id = $1`
 		err := db.QueryRow(ctx, shopQuery, *user.AssignedShopID).Scan(
 			&shop.ID, &shop.Name, &shop.MerchantID, &shop.Address, &shop.Phone,
-			&shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+			&shop.IsActive, &shop.IsPrimary, &shop.DeliveryCharge, &shop.CreatedAt, &shop.UpdatedAt,
 		)
 		if err != nil {
 			log.Printf("Error fetching assigned shop details: %v", err)
@@ -63,4 +67,3 @@ func HandleGetShopProfile(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "success", "data": user})
 }
-

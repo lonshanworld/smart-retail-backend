@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"database/sql"
@@ -20,9 +21,33 @@ func HandleDeleteShop(c *fiber.Ctx) error {
 	shopID := c.Params("shopId")
 	db := database.GetDB()
 	ctx := context.Background()
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	actorID := claims.UserID
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_delete_shop", actorID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
 	query := "DELETE FROM shops WHERE id = $1"
-	result, err := db.Exec(ctx, query, shopID)
+	result, err := tx.Exec(ctx, query, shopID)
 	if err != nil {
 		log.Printf("Error deleting shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to delete shop"})
@@ -33,6 +58,9 @@ func HandleDeleteShop(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 	return c.JSON(fiber.Map{"status": "success", "message": fmt.Sprintf("Shop %s deleted successfully", shopID)})
 }
 
@@ -42,6 +70,11 @@ func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 	shopID := c.Params("shopId")
 	db := database.GetDB()
 	ctx := context.Background()
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	actorID := claims.UserID
 
 	var body struct {
 		IsActive bool `json:"is_active"`
@@ -50,9 +83,28 @@ func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid JSON"})
 	}
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_set_shop_status", actorID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
 	query := "UPDATE shops SET is_active = $1, updated_at = NOW() WHERE id = $2"
-	result, err := db.Exec(ctx, query, body.IsActive, shopID)
+	result, err := tx.Exec(ctx, query, body.IsActive, shopID)
 	if err != nil {
 		log.Printf("Error updating shop active status for shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update shop status"})
@@ -63,6 +115,9 @@ func HandleSetShopActiveStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 	return c.JSON(fiber.Map{"status": "success", "message": fmt.Sprintf("Shop %s status updated successfully to %v", shopID, body.IsActive)})
 }
 

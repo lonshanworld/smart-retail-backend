@@ -43,8 +43,8 @@ func HandleCreateSale(c *fiber.Ctx) error {
 
 	// Create the sale
 	saleQuery := `
-		INSERT INTO sales (shop_id, merchant_id, total_amount, payment_type)
-		VALUES ($1, (SELECT merchant_id FROM shops WHERE id = $1), $2, $3)
+		INSERT INTO sales (shop_id, merchant_id, total_amount, delivery_charge, payment_type)
+		VALUES ($1, (SELECT merchant_id FROM shops WHERE id = $1), $2, $3, $4)
 		RETURNING id, sale_date, payment_status, created_at, updated_at
 	`
 	var sale models.Sale
@@ -52,7 +52,7 @@ func HandleCreateSale(c *fiber.Ctx) error {
 	sale.PaymentType = input.PaymentType
 	sale.TotalAmount = totalAmount
 
-	if err := tx.QueryRow(ctx, saleQuery, input.ShopID, totalAmount, input.PaymentType).Scan(&sale.ID, &sale.SaleDate, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
+	if err := tx.QueryRow(ctx, saleQuery, input.ShopID, totalAmount, 0.0, input.PaymentType).Scan(&sale.ID, &sale.SaleDate, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
 		log.Printf("Error creating sale: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale"})
 	}
@@ -110,12 +110,12 @@ func HandleCreateSale(c *fiber.Ctx) error {
 	invoiceQuery := `
 		INSERT INTO invoices (
 			sale_id, invoice_number, merchant_id, shop_id, customer_id,
-			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			invoice_date, subtotal, discount_amount, tax_amount, delivery_charge, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
 	_, err = tx.Exec(ctx, invoiceQuery,
 		sale.ID, invoiceNumber, merchantID, input.ShopID, nil,
-		time.Now(), subtotal, discountAmount, taxAmount, totalAmount, "paid",
+		time.Now(), subtotal, discountAmount, taxAmount, 0.0, totalAmount, "paid",
 	)
 	if err != nil {
 		log.Printf("Error creating invoice: %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
@@ -145,7 +145,7 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 	log.Printf("📥 [SALES HANDLER] Fetching sales for shopID: %s, page: %d, pageSize: %d", shopID, page, pageSize)
 
 	query := `
-		SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
+		SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
 		FROM sales
 		WHERE shop_id = $1
 		LIMIT $2 OFFSET $3
@@ -160,7 +160,7 @@ func HandleListSalesForShop(c *fiber.Ctx) error {
 	var sales []models.Sale
 	for rows.Next() {
 		var sale models.Sale
-		if err := rows.Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
+		if err := rows.Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.DeliveryCharge, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
 			log.Printf("❌ [SALES HANDLER] Error scanning sale: %v", err)
 			continue
 		}
@@ -233,12 +233,12 @@ func HandleGetSaleByID(c *fiber.Ctx) error {
 	saleID := c.Params("saleId")
 
 	query := `
-		SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
+		SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
 		FROM sales
 		WHERE id = $1
 	`
 	var sale models.Sale
-	if err := db.QueryRow(ctx, query, saleID).Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
+	if err := db.QueryRow(ctx, query, saleID).Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.DeliveryCharge, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
 		log.Printf("Error getting sale by ID: %v", err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Sale not found"})
 	}
@@ -256,7 +256,7 @@ func HandleGetReceipt(c *fiber.Ctx) error {
 	query := `
 		SELECT 
 			s.id, s.sale_date, sh.name, sh.address, m.name, 
-			s.total_amount - s.discount_amount as final_total, s.discount_amount, s.total_amount, 
+			s.total_amount, s.discount_amount, s.delivery_charge, s.total_amount + s.discount_amount - s.delivery_charge as original_total, 
 			s.payment_type, s.payment_status
 		FROM sales s
 		JOIN shops sh ON s.shop_id = sh.id
@@ -266,7 +266,7 @@ func HandleGetReceipt(c *fiber.Ctx) error {
 	var receipt models.Receipt
 	if err := db.QueryRow(ctx, query, saleID).Scan(
 		&receipt.SaleID, &receipt.SaleDate, &receipt.ShopName, &receipt.ShopAddress, &receipt.MerchantName,
-		&receipt.FinalTotal, &receipt.DiscountAmount, &receipt.OriginalTotal,
+		&receipt.FinalTotal, &receipt.DiscountAmount, &receipt.DeliveryCharge, &receipt.OriginalTotal,
 		&receipt.PaymentType, &receipt.PaymentStatus,
 	); err != nil {
 		log.Printf("Error getting receipt: %v", err)

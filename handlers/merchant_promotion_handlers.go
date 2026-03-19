@@ -7,21 +7,23 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 // PromotionCreateRequest defines the structure for creating a promotion.
 type PromotionCreateRequest struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	PromoType   string   `json:"type"`
-	PromoValue  float64  `json:"value"`
-	MinSpend    float64  `json:"minSpend"`
-	StartDate   *string  `json:"startDate"` // Pointer to allow null
-	EndDate     *string  `json:"endDate"`   // Pointer to allow null
-	ShopID      string   `json:"shopId"`
-	ProductIDs  []string `json:"productIds"` // IDs of products this promotion applies to
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	PromoType         string   `json:"type"`
+	PromoValue        float64  `json:"value"`
+	MinSpend          float64  `json:"minSpend"`
+	StartDate         *string  `json:"startDate"` // Pointer to allow null
+	EndDate           *string  `json:"endDate"`   // Pointer to allow null
+	ShopID            string   `json:"shopId"`
+	ProductIDs        []string `json:"productIds"` // IDs of products this promotion applies to
+	ClientOperationID string   `json:"clientOperationId"`
 }
 
 // HandleCreatePromotion creates a new promotion for the merchant.
@@ -39,17 +41,27 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
 	}
+	if strings.TrimSpace(req.ClientOperationID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_create_promotion", merchantID, &req.ShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Operation already processed"})
+	}
 
 	// First check if shop belongs to merchant
 	checkQuery := `SELECT COUNT(*) FROM shops WHERE id = $1 AND merchant_id = $2`
 	var count int
-	err = db.QueryRow(ctx, checkQuery, req.ShopID, merchantID).Scan(&count)
+	err = tx.QueryRow(ctx, checkQuery, req.ShopID, merchantID).Scan(&count)
 	if err != nil {
 		log.Printf("Error checking shop ownership: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to verify shop ownership"})
@@ -64,7 +76,7 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
     `
 	var promotionID string
-	err = db.QueryRow(ctx, promoQuery, merchantID, req.ShopID, req.Name, req.Description, req.PromoType, req.PromoValue, req.MinSpend, req.StartDate, req.EndDate).Scan(&promotionID)
+	err = tx.QueryRow(ctx, promoQuery, merchantID, req.ShopID, req.Name, req.Description, req.PromoType, req.PromoValue, req.MinSpend, req.StartDate, req.EndDate).Scan(&promotionID)
 	if err != nil {
 		log.Printf("Error creating promotion: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to create promotion"})
@@ -96,7 +108,7 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
 		FROM promotions
 		WHERE id = $1
 	`
-	err = db.QueryRow(ctx, fetchQuery, promotionID).Scan(
+	err = tx.QueryRow(ctx, fetchQuery, promotionID).Scan(
 		&promotion.ID, &promotion.MerchantID, &promotion.ShopID, &promotion.Name,
 		&promotion.Description, &promotion.PromoType, &promotion.PromoValue, &promotion.MinSpend,
 		&promotion.StartDate, &promotion.EndDate, &promotion.IsActive,
@@ -179,6 +191,13 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 	merchantID := claims.UserID
 
 	promotionID := c.Params("id")
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
 
 	// Parse the raw body to check if it's just an isActive toggle
 	var rawBody map[string]interface{}
@@ -189,8 +208,20 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 	// If only isActive is provided, do a simple toggle
 	if len(rawBody) == 1 {
 		if isActive, ok := rawBody["isActive"].(bool); ok {
+			tx, err := db.Begin(ctx)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
+			}
+			defer tx.Rollback(ctx)
+			claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_toggle_promotion", merchantID, nil)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+			}
+			if !claimed {
+				return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Operation already processed"})
+			}
 			updateQuery := `UPDATE promotions SET is_active = $1 WHERE id = $2 AND merchant_id = $3`
-			_, err = db.Exec(ctx, updateQuery, isActive, promotionID, merchantID)
+			_, err = tx.Exec(ctx, updateQuery, isActive, promotionID, merchantID)
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to update promotion status"})
 			}
@@ -203,7 +234,7 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 				FROM promotions
 				WHERE id = $1
 			`
-			err = db.QueryRow(ctx, fetchQuery, promotionID).Scan(
+			err = tx.QueryRow(ctx, fetchQuery, promotionID).Scan(
 				&promotion.ID, &promotion.MerchantID, &promotion.ShopID, &promotion.Name,
 				&promotion.Description, &promotion.PromoType, &promotion.PromoValue, &promotion.MinSpend,
 				&promotion.StartDate, &promotion.EndDate, &promotion.IsActive,
@@ -211,6 +242,9 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 			)
 			if err != nil {
 				return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Promotion status updated successfully"})
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to commit transaction"})
 			}
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "data": promotion})
 		}
@@ -221,12 +255,22 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
 	}
+	if strings.TrimSpace(req.ClientOperationID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_update_promotion", merchantID, &req.ShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Operation already processed"})
+	}
 
 	// Update the promotion
 	promoQuery := `
@@ -269,7 +313,7 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 		FROM promotions
 		WHERE id = $1
 	`
-	err = db.QueryRow(ctx, fetchQuery, promotionID).Scan(
+	err = tx.QueryRow(ctx, fetchQuery, promotionID).Scan(
 		&promotion.ID, &promotion.MerchantID, &promotion.ShopID, &promotion.Name,
 		&promotion.Description, &promotion.PromoType, &promotion.PromoValue, &promotion.MinSpend,
 		&promotion.StartDate, &promotion.EndDate, &promotion.IsActive,
@@ -279,6 +323,9 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 		log.Printf("Error fetching updated promotion: %v", err)
 		// Still return success since promotion was updated
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Promotion updated successfully"})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to commit transaction"})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Promotion updated successfully", "data": promotion})
@@ -296,9 +343,28 @@ func HandleDeletePromotion(c *fiber.Ctx) error {
 	merchantID := claims.UserID
 
 	promotionID := c.Params("id")
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_delete_promotion", merchantID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Operation already processed"})
+	}
 
 	query := "DELETE FROM promotions WHERE id = $1 AND merchant_id = $2"
-	commandTag, err := db.Exec(ctx, query, promotionID, merchantID)
+	commandTag, err := tx.Exec(ctx, query, promotionID, merchantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to delete promotion"})
 	}
@@ -306,5 +372,8 @@ func HandleDeletePromotion(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "message": "Promotion not found or you do not have permission to delete it"})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to commit transaction"})
+	}
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Promotion deleted successfully"})
 }

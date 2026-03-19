@@ -150,18 +150,36 @@ func HandleCreateNewSupplier(c *fiber.Ctx) error {
 	}
 
 	input.MerchantID = merchantId
+	if strings.TrimSpace(input.ClientOperationID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, input.ClientOperationID, "merchant_create_supplier", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"data": input, "message": "Operation already processed"})
+	}
 
 	query := `INSERT INTO suppliers (merchant_id, name, contact_name, contact_email, contact_phone, address, notes) 
 	          VALUES ($1, $2, $3, $4, $5, $6, $7) 
 	          RETURNING id, created_at, updated_at`
 
-	err = db.QueryRow(ctx, query, input.MerchantID, input.Name, input.ContactName, input.ContactEmail, input.ContactPhone, input.Address, input.Notes).Scan(&input.ID, &input.CreatedAt, &input.UpdatedAt)
+	err = tx.QueryRow(ctx, query, input.MerchantID, input.Name, input.ContactName, input.ContactEmail, input.ContactPhone, input.Address, input.Notes).Scan(&input.ID, &input.CreatedAt, &input.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "suppliers_merchant_id_name_key") {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "A supplier with this name already exists for your account."})
 		}
 		log.Printf("Error creating supplier: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create supplier"})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to commit transaction"})
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"data": input})
@@ -182,6 +200,25 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	var updates map[string]interface{}
 	if err := c.BodyParser(&updates); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid JSON format"})
+	}
+	clientOperationID, _ := updates["clientOperationId"].(string)
+	if clientOperationID == "" {
+		clientOperationID, _ = updates["client_operation_id"].(string)
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_update_supplier", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"data": fiber.Map{}, "message": "Operation already processed"})
 	}
 
 	var setParts []string
@@ -209,7 +246,7 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	var s models.Supplier
 	var contactName, contactEmail, contactPhone, address, notes sql.NullString
 
-	err = db.QueryRow(ctx, query, args...).Scan(
+	err = tx.QueryRow(ctx, query, args...).Scan(
 		&s.ID, &s.MerchantID, &s.Name, &contactName, &contactEmail, &contactPhone, &address, &notes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
@@ -225,6 +262,9 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	s.ContactPhone = utils.NullStringToStringPtr(contactPhone)
 	s.Address = utils.NullStringToStringPtr(address)
 	s.Notes = utils.NullStringToStringPtr(notes)
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to commit transaction"})
+	}
 
 	return c.JSON(fiber.Map{"data": s})
 }
@@ -242,8 +282,27 @@ func HandleDeleteExistingSupplier(c *fiber.Ctx) error {
 	supplierId := c.Params("supplierId")
 
 	query := "DELETE FROM suppliers WHERE id = $1 AND merchant_id = $2"
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_delete_supplier", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
 
-	res, err := db.Exec(ctx, query, supplierId, merchantId)
+	res, err := tx.Exec(ctx, query, supplierId, merchantId)
 	if err != nil {
 		log.Printf("Error deleting supplier: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete supplier"})
@@ -253,6 +312,9 @@ func HandleDeleteExistingSupplier(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Supplier not found or you do not have permission to delete it"})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to commit transaction"})
+	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 

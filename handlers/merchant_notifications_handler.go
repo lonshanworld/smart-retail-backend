@@ -108,9 +108,28 @@ func HandleMarkNotificationAsRead(c *fiber.Ctx) error {
 	}
 	recipientId := claims.UserID
 	notificationId := c.Params("notificationId")
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "mark_notification_read", recipientId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.JSON(fiber.Map{"success": true, "message": "Notification marked as read"})
+	}
 
 	query := "UPDATE notifications SET is_read = TRUE, updated_at = NOW() WHERE id = $1 AND recipient_user_id = $2"
-	res, err := db.Exec(ctx, query, notificationId, recipientId)
+	res, err := tx.Exec(ctx, query, notificationId, recipientId)
 	if err != nil {
 		log.Printf("Error marking notification as read: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -120,5 +139,8 @@ func HandleMarkNotificationAsRead(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "message": "Notification not found or you do not have permission to modify it."})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to commit transaction"})
+	}
 	return c.JSON(fiber.Map{"success": true, "message": "Notification marked as read"})
 }

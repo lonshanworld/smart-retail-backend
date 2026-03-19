@@ -13,7 +13,8 @@ import (
 
 // ShopStockInRequest defines the expected body for a shop stock-in request.
 type ShopStockInRequest struct {
-	Items []models.StockInItem `json:"items"`
+	ClientOperationID string               `json:"clientOperationId"`
+	Items             []models.StockInItem `json:"items"`
 }
 
 // HandleShopStockIn handles the bulk stock-in of items for a specific shop by a merchant.
@@ -42,6 +43,9 @@ func HandleShopStockIn(c *fiber.Ctx) error {
 	if len(req.Items) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "At least one item is required for stock-in"})
 	}
+	if req.ClientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
 
 	// --- Transaction Begins ---
 	tx, err := db.Begin(ctx)
@@ -63,6 +67,15 @@ func HandleShopStockIn(c *fiber.Ctx) error {
 	}
 	if dbMerchantID != merchantID {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "You do not have permission to stock in items for this shop"})
+	}
+
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_shop_stock_in", merchantID, &shopID)
+	if err != nil {
+		log.Printf("Failed to reserve inventory operation %s: %v", req.ClientOperationID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start inventory operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Stock-in already processed"})
 	}
 
 	// 2. Process each item

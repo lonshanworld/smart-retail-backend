@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -27,25 +28,48 @@ func HandleSearchShopProducts(c *fiber.Ctx) error {
 	staffID := claims.UserID
 	searchTerm := c.Query("searchTerm")
 
+	// optional filters
+	categoryId := c.Query("categoryId")
+	subcategoryId := c.Query("subcategoryId")
+	brandId := c.Query("brandId")
+
 	shopID, err := getShopIDFromStaffID(ctx, db, staffID)
 	if err != nil {
 		log.Printf("Error finding shop for staff ID %s: %v", staffID, err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Could not find an assigned shop for this staff member."})
 	}
 
-	query := `
-        SELECT ii.id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price,
-               ss.quantity, ss.shop_id, ii.created_at, ii.updated_at
-        FROM inventory_items ii
-        JOIN shop_stock ss ON ii.id = ss.inventory_item_id
-        WHERE ss.shop_id = $1
-          AND (ii.name ILIKE $2 OR ii.sku ILIKE $2)
-          AND ii.is_archived = FALSE
-        ORDER BY ii.name ASC
-        LIMIT 50
-    `
+	baseQuery := `
+		SELECT ii.id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price,
+			   ss.quantity, ss.shop_id, ii.created_at, ii.updated_at
+		FROM inventory_items ii
+		JOIN shop_stock ss ON ii.id = ss.inventory_item_id
+		WHERE ss.shop_id = $1
+		  AND (ii.name ILIKE $2 OR ii.sku ILIKE $2)
+		  AND ii.is_archived = FALSE
+	`
 
-	rows, err := db.Query(ctx, query, shopID, "%"+searchTerm+"%")
+	args := []interface{}{shopID, "%" + searchTerm + "%"}
+	argPos := 3
+	if categoryId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.category_id = $%d", argPos)
+		args = append(args, categoryId)
+		argPos++
+	}
+	if subcategoryId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.subcategory_id = $%d", argPos)
+		args = append(args, subcategoryId)
+		argPos++
+	}
+	if brandId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.brand_id = $%d", argPos)
+		args = append(args, brandId)
+		argPos++
+	}
+
+	finalQuery := baseQuery + "\n        ORDER BY ii.name ASC\n        LIMIT 50\n    "
+
+	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
 		log.Printf("Error searching for products in shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to search for products."})
@@ -68,7 +92,7 @@ func HandleSearchShopProducts(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items})
 }
 
 // HandleShopCheckout processes a new sale transaction from a shop terminal.
@@ -85,6 +109,13 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	var req models.CheckoutRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+	clientSaleID := strings.TrimSpace(req.ClientSaleID)
+	if clientSaleID == "" {
+		clientSaleID = strings.TrimSpace(req.ID)
+	}
+	if clientSaleID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientSaleId is required"})
 	}
 
 	shopID, err := getShopIDFromStaffID(ctx, db, staffID)
@@ -116,8 +147,19 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Could not start transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientSaleID, "shop_pos_checkout", staffID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		sale, err := getFullSaleDetails(ctx, db, clientSaleID)
+		if err == nil {
+			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
-	saleID, err := createSaleRecord(ctx, tx, shopID, merchantID, staffID, req)
+	saleID, err := createSaleRecord(ctx, tx, shopID, merchantID, staffID, clientSaleID, req)
 	if err != nil {
 		log.Printf("Error creating sale record: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Could not create sale record"})
@@ -138,7 +180,7 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	}
 
 	// Calculate invoice amounts (req already has totalAmount)
-	subtotal := req.TotalAmount + req.DiscountAmount
+	subtotal := req.TotalAmount + req.DiscountAmount - req.DeliveryCharge
 	taxAmount := 0.0 // Implement tax calculation if needed
 
 	// Debug logging: show invoice parameters before insert
@@ -148,12 +190,12 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	invoiceQuery := `
 		INSERT INTO invoices (
 			sale_id, invoice_number, merchant_id, shop_id, customer_id,
-			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			invoice_date, subtotal, discount_amount, tax_amount, delivery_charge, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
 	_, err = tx.Exec(ctx, invoiceQuery,
 		saleID, invoiceNumber, merchantID, shopID, req.CustomerID,
-		time.Now(), subtotal, req.DiscountAmount, taxAmount, req.TotalAmount, "paid",
+		time.Now(), subtotal, req.DiscountAmount, taxAmount, req.DeliveryCharge, req.TotalAmount, "paid",
 	)
 	if err != nil {
 		log.Printf("Error creating invoice: %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
@@ -171,10 +213,10 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	sale, err := getFullSaleDetails(ctx, db, saleID)
 	if err != nil {
 		log.Printf("Error retrieving final sale details: %v", err)
-		return c.Status(201).JSON(fiber.Map{"status": "success", "message": "Checkout successful, but failed to retrieve final details"})
+		return c.Status(201).JSON(fiber.Map{"status": "success", "success": true, "message": "Checkout successful, but failed to retrieve final details"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": sale})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
 }
 
 func getMerchantIDFromShopID(ctx context.Context, db *pgxpool.Pool, shopID string) (string, error) {
@@ -184,14 +226,14 @@ func getMerchantIDFromShopID(ctx context.Context, db *pgxpool.Pool, shopID strin
 	return merchantID, err
 }
 
-func createSaleRecord(ctx context.Context, tx pgx.Tx, shopID, merchantID, staffID string, req models.CheckoutRequest) (string, error) {
+func createSaleRecord(ctx context.Context, tx pgx.Tx, shopID, merchantID, staffID, clientSaleID string, req models.CheckoutRequest) (string, error) {
 	var saleID string
 	query := `
-        INSERT INTO sales (shop_id, merchant_id, staff_id, total_amount, payment_type, customer_id, sale_date)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, delivery_charge, payment_type, customer_id, sale_date)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING id
     `
-	err := tx.QueryRow(ctx, query, shopID, merchantID, staffID, req.TotalAmount, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
+	err := tx.QueryRow(ctx, query, clientSaleID, clientSaleID, shopID, merchantID, staffID, req.TotalAmount, req.DeliveryCharge, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
 	return saleID, err
 }
 
@@ -243,9 +285,9 @@ func processSaleItem(ctx context.Context, tx pgx.Tx, saleID, shopID, staffID str
 
 func getFullSaleDetails(ctx context.Context, db *pgxpool.Pool, saleID string) (*models.Sale, error) {
 	var sale models.Sale
-	saleQuery := "SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, payment_type, payment_status, created_at, updated_at FROM sales WHERE id = $1"
+	saleQuery := "SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, delivery_charge, payment_type, payment_status, created_at, updated_at FROM sales WHERE id = $1"
 	err := db.QueryRow(ctx, saleQuery, saleID).Scan(
-		&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt,
+		&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.DeliveryCharge, &sale.PaymentType, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -349,5 +391,5 @@ func HandleGetActivePromotionsForShop(c *fiber.Ctx) error {
 		promotions = append(promotions, promo)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": promotions})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": promotions})
 }

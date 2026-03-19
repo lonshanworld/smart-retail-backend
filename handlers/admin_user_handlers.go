@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"app/utils"
 	"context"
@@ -71,6 +72,12 @@ func HandleCreateUser(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	actorID := claims.UserID
+
 	// Define a flexible request structure that accepts both camelCase and snake_case
 	var rawBody map[string]interface{}
 	if err := c.BodyParser(&rawBody); err != nil {
@@ -138,6 +145,10 @@ func HandleCreateUser(c *fiber.Ctx) error {
 		BusinessAddress: getStringPtr("businessAddress", "business_address"),
 		MerchantID:      getString("merchantId", "merchant_id"),
 	}
+	clientOperationID := getString("clientOperationId", "client_operation_id")
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
 
 	// Log the request with actual values
 	log.Printf("Received create user request: Name=%s, Email=%s, Role=%s, ShopName=%s, IsActive=%v, Phone=%v, BusinessAddress=%v, MerchantID=%s",
@@ -172,6 +183,13 @@ func HandleCreateUser(c *fiber.Ctx) error {
 		})
 	}
 	defer tx.Rollback(ctx) // Will rollback if not committed
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_create_user", actorID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -352,11 +370,17 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	actorID := claims.UserID
+
 	userID := c.Params("userId")
 
 	// First, get the current user data
 	var currentUser models.User
-	err := db.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		SELECT id, name, email, role, is_active, created_at, updated_at 
 		FROM users WHERE id = $1`,
 		userID,
@@ -381,6 +405,18 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 			"message": "Invalid request body",
 		})
 	}
+	clientOperationID := ""
+	if v, ok := rawReq["clientOperationId"].(string); ok {
+		clientOperationID = v
+	}
+	if clientOperationID == "" {
+		if v, ok := rawReq["client_operation_id"].(string); ok {
+			clientOperationID = v
+		}
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
 
 	// Build structured request, handling both snake_case and camelCase
 	var req struct {
@@ -400,10 +436,10 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 		req.Role = &role
 	}
 	// Handle both is_active and isActive
-	if isActive, ok := rawReq["is_active"].(bool); ok {
-		req.IsActive = &isActive
-	} else if isActive, ok := rawReq["isActive"].(bool); ok {
-		req.IsActive = &isActive
+	if isActiveVal, ok := rawReq["is_active"].(bool); ok {
+		req.IsActive = &isActiveVal
+	} else if isActiveVal2, ok2 := rawReq["isActive"].(bool); ok2 {
+		req.IsActive = &isActiveVal2
 	}
 
 	log.Printf("Received update user request for ID %s: %+v", userID, req)
@@ -456,6 +492,18 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 	setValues = append(setValues, "updated_at = NOW()")
 
 	// Build and execute the query
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_update_user", actorID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 	query := fmt.Sprintf(`
 		UPDATE users 
 		SET %s 
@@ -467,7 +515,7 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 	args = append(args, userID)
 
 	var user models.User
-	err = db.QueryRow(ctx, query, args...).Scan(
+	err = tx.QueryRow(ctx, query, args...).Scan(
 		&user.ID, &user.Name, &user.Email,
 		&user.Role, &user.IsActive,
 		&user.CreatedAt, &user.UpdatedAt,
@@ -480,6 +528,9 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 		})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit operation"})
+	}
 	return c.JSON(fiber.Map{"status": "success", "data": user})
 }
 
@@ -488,13 +539,41 @@ func HandleHardDeleteUser(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	actorID := claims.UserID
+
 	userID := c.Params("userId")
 
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "admin_hard_delete_user", actorID, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.SendStatus(fiber.StatusOK)
+	}
 	query := "DELETE FROM users WHERE id = $1"
-	_, err := db.Exec(ctx, query, userID)
+	_, err = tx.Exec(ctx, query, userID)
 	if err != nil {
 		log.Printf("Error deleting user with ID %s: %v", userID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to delete user"})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit operation"})
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)

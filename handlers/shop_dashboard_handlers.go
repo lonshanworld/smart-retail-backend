@@ -35,7 +35,7 @@ func HandleDashboardListSales(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 
 	query := `
-        SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
+	SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
         FROM sales
         WHERE shop_id = $1
         LIMIT $2 OFFSET $3
@@ -51,7 +51,7 @@ func HandleDashboardListSales(c *fiber.Ctx) error {
 	var sales []models.Sale
 	for rows.Next() {
 		var sale models.Sale
-		if err := rows.Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
+		if err := rows.Scan(&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.StaffID, &sale.CustomerID, &sale.SaleDate, &sale.TotalAmount, &sale.DeliveryCharge, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt); err != nil {
 			log.Printf("Error scanning sale row: %v", err)
 			continue
 		}
@@ -251,7 +251,8 @@ func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "shopId query parameter is required"})
 	}
 
-	if userRole == "merchant" {
+	switch userRole {
+	case "merchant":
 		// Verify merchant owns the shop
 		var merchantID string
 		shopCheckQuery := "SELECT merchant_id FROM shops WHERE id = $1"
@@ -263,7 +264,7 @@ func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 			log.Printf("Access denied: Shop %s belongs to merchant %s, not %s", shopID, merchantID, userID)
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied to this shop"})
 		}
-	} else if userRole == "staff" {
+	case "staff":
 		// Verify staff is assigned to this shop
 		var assignedShopID *string
 		staffQuery := "SELECT assigned_shop_id FROM users WHERE id = $1"
@@ -278,7 +279,7 @@ func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 			log.Printf("Access denied: Staff %s is assigned to shop %s, not %s", userID, *assignedShopID, shopID)
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied to this shop"})
 		}
-	} else {
+	default:
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied"})
 	}
 

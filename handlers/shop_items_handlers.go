@@ -5,6 +5,7 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
@@ -28,34 +29,60 @@ func getShopIDFromStaffID(ctx context.Context, db *pgxpool.Pool, staffID string)
 func HandleGetShopItems(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
-
 	// Get shopId from query parameter
 	shopID := c.Query("shopId")
 	if shopID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "shopId query parameter is required"})
 	}
 
-	log.Printf("Fetching items for shop %s", shopID)
+	// Optional filters
+	categoryId := c.Query("categoryId")
+	subcategoryId := c.Query("subcategoryId")
+	brandId := c.Query("brandId")
 
-	query := `
-        SELECT
-            ss.inventory_item_id,
-            ii.merchant_id,
-            ii.name,
-            ii.sku,
-            ii.selling_price,
-            ii.original_price,
-            ss.quantity,
-            ss.shop_id,
-            ii.created_at,
-            ii.updated_at
-        FROM shop_stock ss
-        JOIN inventory_items ii ON ss.inventory_item_id = ii.id
-        WHERE ss.shop_id = $1
-        ORDER BY ii.name ASC
-    `
+	log.Printf("Fetching items for shop %s (filters: category=%s, subcategory=%s, brand=%s)", shopID, categoryId, subcategoryId, brandId)
 
-	rows, err := db.Query(ctx, query, shopID)
+	// Build query with optional filters
+	baseQuery := `
+		SELECT
+			ss.inventory_item_id,
+			ii.merchant_id,
+			ii.name,
+			ii.sku,
+			ii.selling_price,
+			ii.original_price,
+			ss.quantity,
+			ss.shop_id,
+			ii.created_at,
+			ii.updated_at
+		FROM shop_stock ss
+		JOIN inventory_items ii ON ss.inventory_item_id = ii.id
+		WHERE ss.shop_id = $1
+	`
+
+	whereClauses := ""
+	args := []interface{}{shopID}
+	argPos := 2
+
+	if categoryId != "" {
+		whereClauses += fmt.Sprintf(" AND ii.category_id = $%d", argPos)
+		args = append(args, categoryId)
+		argPos++
+	}
+	if subcategoryId != "" {
+		whereClauses += fmt.Sprintf(" AND ii.subcategory_id = $%d", argPos)
+		args = append(args, subcategoryId)
+		argPos++
+	}
+	if brandId != "" {
+		whereClauses += fmt.Sprintf(" AND ii.brand_id = $%d", argPos)
+		args = append(args, brandId)
+		argPos++
+	}
+
+	finalQuery := baseQuery + whereClauses + "\n        ORDER BY ii.name ASC\n    "
+
+	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
 		log.Printf("Error querying shop items for shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shop inventory."})
@@ -87,7 +114,7 @@ func HandleGetShopItems(c *fiber.Ctx) error {
 	}
 
 	log.Printf("Returning %d items for shop %s", len(items), shopID)
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items})
 }
 
 type UpdateStockRequest struct {
@@ -133,7 +160,7 @@ func HandleUpdateShopItemStock(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Item not found in this shop's inventory."})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Stock quantity updated successfully."})
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "message": "Stock quantity updated successfully."})
 }
 
 // HandleGetStaffItems retrieves all inventory items for the staff member's assigned shop.
@@ -210,5 +237,5 @@ func HandleGetStaffItems(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "data": items})
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "data": items})
 }

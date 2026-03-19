@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS shops (
     merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     address TEXT,
     phone VARCHAR(50),
+    tax_rate NUMERIC(5,2) NOT NULL DEFAULT 5.00 CHECK (tax_rate >= 0 AND tax_rate <= 100),
     is_active BOOLEAN DEFAULT TRUE,
     is_primary BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -67,6 +68,40 @@ CREATE TABLE IF NOT EXISTS suppliers (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Categories and Brands
+CREATE TABLE IF NOT EXISTS brands (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    image_url TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(merchant_id, name)
+);
+
+-- Two-level category model: categories (level 1) and subcategories (level 2)
+CREATE TABLE IF NOT EXISTS categories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(merchant_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS subcategories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(category_id, name)
+);
+
+
 -- Master inventory of items for a merchant
 CREATE TABLE IF NOT EXISTS inventory_items (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -78,6 +113,10 @@ CREATE TABLE IF NOT EXISTS inventory_items (
     original_price NUMERIC(10, 2),
     low_stock_threshold INTEGER,
     category VARCHAR(100),
+    -- New normalized category/brand relationships (nullable for migration)
+    category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
+    subcategory_id UUID REFERENCES subcategories(id) ON DELETE SET NULL,
+    brand_id UUID REFERENCES brands(id) ON DELETE SET NULL,
     supplier_id UUID REFERENCES suppliers(id) ON DELETE SET NULL,
     is_archived BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -107,6 +146,16 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     reason VARCHAR(255), -- For adjustments like 'damage', 'theft'
     movement_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     notes TEXT
+);
+
+-- Client-generated inventory operation IDs used for idempotent stock mutations
+CREATE TABLE IF NOT EXISTS inventory_operations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    client_operation_id TEXT UNIQUE NOT NULL,
+    operation_type VARCHAR(80) NOT NULL,
+    actor_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    shop_id UUID REFERENCES shops(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Customers associated with a specific shop
@@ -149,12 +198,14 @@ CREATE TABLE IF NOT EXISTS promotion_products (
 -- Sales transactions
 CREATE TABLE IF NOT EXISTS sales (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    client_sale_id TEXT UNIQUE,
     shop_id UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
     merchant_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     staff_id UUID REFERENCES users(id) ON DELETE SET NULL,
     customer_id UUID REFERENCES shop_customers(id) ON DELETE SET NULL,
     sale_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     total_amount NUMERIC(10, 2) NOT NULL,
+    delivery_charge NUMERIC(10, 2) DEFAULT 0.00,
     applied_promotion_id UUID REFERENCES promotions(id) ON DELETE SET NULL,
     discount_amount NUMERIC(10, 2) DEFAULT 0.00,
     payment_type VARCHAR(50) NOT NULL,
@@ -193,6 +244,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     subtotal NUMERIC(10, 2) NOT NULL,
     discount_amount NUMERIC(10, 2) DEFAULT 0.00,
     tax_amount NUMERIC(10, 2) DEFAULT 0.00,
+    delivery_charge NUMERIC(10, 2) DEFAULT 0.00,
     total_amount NUMERIC(10, 2) NOT NULL,
     payment_status VARCHAR(50) NOT NULL DEFAULT 'paid', -- 'paid', 'pending', 'overdue', 'cancelled'
     notes TEXT,
@@ -225,3 +277,147 @@ CREATE TABLE IF NOT EXISTS notifications (
     is_read BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =====================================================
+-- Migration helper: populate categories/subcategories
+-- This block is idempotent and attempts to migrate existing
+-- `inventory_items.category` textual values into normalized tables.
+-- It treats a '>' in the text as a separator: "Category > Subcategory".
+-- Review results before dropping the original `category` column.
+-- =====================================================
+
+BEGIN;
+
+-- Create top-level categories from distinct inventory_items.category values
+INSERT INTO categories (merchant_id, name)
+SELECT DISTINCT merchant_id, trim(split_part(category, '>', 1))
+FROM inventory_items
+WHERE category IS NOT NULL AND trim(category) <> ''
+ON CONFLICT (merchant_id, name) DO NOTHING;
+
+-- Create subcategories when a second part exists
+INSERT INTO subcategories (category_id, name)
+SELECT c.id, trim(split_part(i.category, '>', 2))
+FROM inventory_items i
+JOIN categories c ON c.merchant_id = i.merchant_id AND c.name = trim(split_part(i.category, '>', 1))
+WHERE split_part(i.category, '>', 2) IS NOT NULL AND trim(split_part(i.category, '>', 2)) <> ''
+ON CONFLICT (category_id, name) DO NOTHING;
+
+-- Link inventory_items to created categories and subcategories
+UPDATE inventory_items i
+SET category_id = c.id
+FROM categories c
+WHERE c.merchant_id = i.merchant_id AND c.name = trim(split_part(i.category, '>', 1));
+
+UPDATE inventory_items i
+SET subcategory_id = s.id
+FROM subcategories s
+JOIN categories c ON s.category_id = c.id
+WHERE c.merchant_id = i.merchant_id
+    AND c.name = trim(split_part(i.category, '>', 1))
+    AND s.name = trim(split_part(i.category, '>', 2));
+
+COMMIT;
+
+-- =====================================================
+-- Additive shop-generic schema extensions for multi-business support
+-- These are additive and shop-scoped to support many business types
+-- =====================================================
+
+-- Add flexible business type and JSON settings to shops
+ALTER TABLE shops
+ADD COLUMN IF NOT EXISTS business_type VARCHAR(100) DEFAULT 'retail',
+ADD COLUMN IF NOT EXISTS settings JSONB DEFAULT '{}'::jsonb,
+ADD COLUMN IF NOT EXISTS opening_hours JSONB DEFAULT NULL,
+ADD COLUMN IF NOT EXISTS supports_delivery BOOLEAN DEFAULT FALSE;
+
+-- Shop-level payment settings (site can also use merchant-level settings)
+CREATE TABLE IF NOT EXISTS payment_settings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    shop_id UUID REFERENCES shops(id) ON DELETE CASCADE,
+    qr_image_url TEXT DEFAULT '',
+    tax NUMERIC(5,2) DEFAULT 0,
+    service_charge NUMERIC(10,2) DEFAULT 0,
+    delivery_charge NUMERIC(10,2) DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (shop_id)
+);
+
+-- Generic testimonials for a shop or merchant (suitable for any business type)
+CREATE TABLE IF NOT EXISTS testimonials (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    shop_id UUID REFERENCES shops(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    role VARCHAR(255),
+    content TEXT NOT NULL,
+    rating SMALLINT DEFAULT 5 CHECK (rating >= 1 AND rating <= 5),
+    avatar TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Support tickets and messages (shop-scoped, works for retail, pharmacy, services, etc.)
+CREATE TABLE IF NOT EXISTS support_tickets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    merchant_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    shop_id UUID REFERENCES shops(id) ON DELETE CASCADE,
+    subject TEXT NOT NULL,
+    status VARCHAR(50) DEFAULT 'OPEN',
+    priority VARCHAR(50) DEFAULT 'MEDIUM',
+    customer_name VARCHAR(255),
+    customer_email VARCHAR(255),
+    customer_phone VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS support_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    ticket_id UUID NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+    sender_role VARCHAR(50) DEFAULT 'CUSTOMER', -- CUSTOMER, ADMIN, STAFF
+    content TEXT NOT NULL,
+    is_admin_reply BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- External ID mapping table to correlate external systems (e.g., pharmacy Prisma) to Smart Retail UUIDs
+CREATE TABLE IF NOT EXISTS external_id_map (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source VARCHAR(100) NOT NULL,         -- e.g. 'pharmacy-prisma'
+    source_id TEXT NOT NULL,              -- e.g. cuid() value from external system
+    target_table VARCHAR(100) NOT NULL,   -- e.g. 'inventory_items'
+    target_id UUID NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, source_id, target_table)
+);
+
+-- Migration audit table for storing raw values during ETL (optional, helpful for debugging)
+CREATE TABLE IF NOT EXISTS migration_audit (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source VARCHAR(100) NOT NULL,
+    source_id TEXT,
+    target_table VARCHAR(100),
+    payload JSONB,
+    imported_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Convenience view: shop_settings flattened for quick reads
+CREATE OR REPLACE VIEW shop_settings_view AS
+SELECT s.id AS shop_id,
+       s.merchant_id,
+       s.name AS shop_name,
+       s.business_type,
+       COALESCE(ps.tax, 0) AS tax,
+       COALESCE(ps.service_charge, 0) AS service_charge,
+       COALESCE(ps.delivery_charge, 0) AS delivery_charge,
+       s.settings AS shop_settings,
+       s.opening_hours
+FROM shops s
+LEFT JOIN payment_settings ps ON ps.shop_id = s.id;
+
+-- End of additive schema extensions
+
+ALTER TABLE brands ADD COLUMN IF NOT EXISTS image_url TEXT;

@@ -13,10 +13,11 @@ import (
 
 // MoveStockRequest defines the request body for moving stock between shops
 type MoveStockRequest struct {
-	ItemID     string `json:"itemId"`
-	FromShopID string `json:"fromShopId"`
-	ToShopID   string `json:"toShopId"`
-	Quantity   int    `json:"quantity"`
+	ClientOperationID string `json:"clientOperationId"`
+	ItemID            string `json:"itemId"`
+	FromShopID        string `json:"fromShopId"`
+	ToShopID          string `json:"toShopId"`
+	Quantity          int    `json:"quantity"`
 }
 
 // HandleMoveStock moves stock of an item from one shop to another
@@ -51,6 +52,13 @@ func HandleMoveStock(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Quantity must be greater than 0",
+		})
+	}
+
+	if req.ClientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"status":  "error",
+			"message": "clientOperationId is required",
 		})
 	}
 
@@ -133,6 +141,21 @@ func HandleMoveStock(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"status":  "error",
 			"message": "You don't have permission to move this item",
+		})
+	}
+
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_move_stock", merchantID, &req.FromShopID)
+	if err != nil {
+		log.Printf("Failed to reserve inventory operation %s: %v", req.ClientOperationID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"status":  "error",
+			"message": "Failed to start inventory operation",
+		})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status":  "success",
+			"message": "Stock move already processed",
 		})
 	}
 

@@ -85,47 +85,87 @@ type Merchant struct {
 
 // Shop represents a single retail location owned by a merchant.
 type Shop struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	MerchantID string    `json:"merchantId"`
-	Address    *string   `json:"address,omitempty"`
-	Phone      *string   `json:"phone,omitempty"`
-	IsActive   bool      `json:"isActive"`
-	IsPrimary  bool      `json:"isPrimary"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	MerchantID     string    `json:"merchantId"`
+	Address        *string   `json:"address,omitempty"`
+	Phone          *string   `json:"phone,omitempty"`
+	TaxRate        float64   `json:"taxRate"`
+	IsActive       bool      `json:"isActive"`
+	DeliveryCharge float64   `json:"deliveryCharge"`
+	IsPrimary      bool      `json:"isPrimary"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// Category represents a top-level product category for a merchant.
+type Category struct {
+	ID          string    `json:"id"`
+	MerchantID  string    `json:"merchantId"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// Subcategory represents a second-level product category linked to a Category.
+type Subcategory struct {
+	ID          string    `json:"id"`
+	CategoryID  string    `json:"categoryId"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// Brand represents a product brand for a merchant.
+type Brand struct {
+	ID          string    `json:"id"`
+	MerchantID  string    `json:"merchantId"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	ImageUrl    *string   `json:"imageUrl,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // Supplier provides items to merchants.
 type Supplier struct {
-	ID           string    `json:"id"`
-	MerchantID   string    `json:"merchantId"`
-	Name         string    `json:"name"`
-	ContactName  *string   `json:"contactName,omitempty"`
-	ContactEmail *string   `json:"contactEmail,omitempty"`
-	ContactPhone *string   `json:"contactPhone,omitempty"`
-	Address      *string   `json:"address,omitempty"`
-	Notes        *string   `json:"notes,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	MerchantID        string    `json:"merchantId"`
+	Name              string    `json:"name"`
+	ClientOperationID string    `json:"clientOperationId,omitempty"`
+	ContactName       *string   `json:"contactName,omitempty"`
+	ContactEmail      *string   `json:"contactEmail,omitempty"`
+	ContactPhone      *string   `json:"contactPhone,omitempty"`
+	Address           *string   `json:"address,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // InventoryItem represents an item in the master inventory of a merchant.
 type InventoryItem struct {
-	ID                string     `json:"id"`
-	MerchantID        string     `json:"merchantId"`
-	Name              string     `json:"name"`
-	Description       *string    `json:"description,omitempty"`
-	SKU               *string    `json:"sku,omitempty"`
-	SellingPrice      float64    `json:"sellingPrice"`
-	OriginalPrice     *float64   `json:"originalPrice,omitempty"`
-	LowStockThreshold *int       `json:"lowStockThreshold,omitempty"`
-	Category          *string    `json:"category,omitempty"`
-	SupplierID        *string    `json:"supplierId,omitempty"`
-	IsArchived        bool       `json:"isArchived"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
-	Stock             *ShopStock `json:"stock,omitempty"`
+	ID                string       `json:"id"`
+	MerchantID        string       `json:"merchantId"`
+	Name              string       `json:"name"`
+	Description       *string      `json:"description,omitempty"`
+	SKU               *string      `json:"sku,omitempty"`
+	SellingPrice      float64      `json:"sellingPrice"`
+	OriginalPrice     *float64     `json:"originalPrice,omitempty"`
+	LowStockThreshold *int         `json:"lowStockThreshold,omitempty"`
+	Category          *string      `json:"category,omitempty"` // legacy textual category
+	CategoryID        *string      `json:"categoryId,omitempty"`
+	SubcategoryID     *string      `json:"subcategoryId,omitempty"`
+	BrandID           *string      `json:"brandId,omitempty"`
+	CategoryObj       *Category    `json:"categoryObj,omitempty"`
+	SubcategoryObj    *Subcategory `json:"subcategoryObj,omitempty"`
+	BrandObj          *Brand       `json:"brandObj,omitempty"`
+	SupplierID        *string      `json:"supplierId,omitempty"`
+	IsArchived        bool         `json:"isArchived"`
+	CreatedAt         time.Time    `json:"createdAt"`
+	UpdatedAt         time.Time    `json:"updatedAt"`
+	Stock             *ShopStock   `json:"stock,omitempty"`
 }
 
 // InventoryItemWithQuantity extends InventoryItem with shop-specific stock quantity.
@@ -159,14 +199,15 @@ type StockMovement struct {
 
 // ShopCustomer represents a customer associated with a specific shop.
 type ShopCustomer struct {
-	ID         string    `json:"id"`
-	ShopID     string    `json:"shopId"`
-	MerchantID string    `json:"merchantId"`
-	Name       string    `json:"name"`
-	Email      *string   `json:"email,omitempty"`
-	Phone      *string   `json:"phone,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	ShopID            string    `json:"shopId"`
+	MerchantID        string    `json:"merchantId"`
+	Name              string    `json:"name"`
+	ClientOperationID string    `json:"clientOperationId,omitempty"`
+	Email             *string   `json:"email,omitempty"`
+	Phone             *string   `json:"phone,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // Promotion represents a discount or offer.
@@ -196,6 +237,7 @@ type Sale struct {
 	CustomerID            *string    `json:"customerId,omitempty"`
 	SaleDate              time.Time  `json:"saleDate"`
 	TotalAmount           float64    `json:"totalAmount"`
+	DeliveryCharge        float64    `json:"deliveryCharge"`
 	AppliedPromotionID    *string    `json:"appliedPromotionId,omitempty"`
 	DiscountAmount        *float64   `json:"discountAmount,omitempty"`
 	PaymentType           string     `json:"paymentType"`
@@ -220,6 +262,7 @@ type Invoice struct {
 	Subtotal       float64    `json:"subtotal"`
 	DiscountAmount float64    `json:"discountAmount"`
 	TaxAmount      float64    `json:"taxAmount"`
+	DeliveryCharge float64    `json:"deliveryCharge"`
 	TotalAmount    float64    `json:"totalAmount"`
 	PaymentStatus  string     `json:"paymentStatus"`
 	Notes          *string    `json:"notes,omitempty"`
@@ -279,12 +322,13 @@ type CreateUserRequest struct {
 
 // CreateShopRequest defines the body for creating a new shop.
 type CreateShopRequest struct {
-	Name       string  `json:"name"`
-	MerchantID string  `json:"merchantId"`
-	Address    *string `json:"address,omitempty"`
-	Phone      *string `json:"phone,omitempty"`
-	IsActive   bool    `json:"isActive"`
-	IsPrimary  bool    `json:"isPrimary"`
+	Name       string   `json:"name"`
+	MerchantID string   `json:"merchantId"`
+	Address    *string  `json:"address,omitempty"`
+	Phone      *string  `json:"phone,omitempty"`
+	TaxRate    *float64 `json:"taxRate,omitempty"`
+	IsActive   bool     `json:"isActive"`
+	IsPrimary  bool     `json:"isPrimary"`
 }
 
 // AdminDashboardSummary defines the structure for the admin dashboard summary.
@@ -446,6 +490,7 @@ type Receipt struct {
 	MerchantName   string        `json:"merchantName"`
 	OriginalTotal  float64       `json:"originalTotal"`
 	DiscountAmount float64       `json:"discountAmount"`
+	DeliveryCharge float64       `json:"deliveryCharge"`
 	FinalTotal     float64       `json:"finalTotal"`
 	PaymentType    string        `json:"paymentType"`
 	PaymentStatus  string        `json:"paymentStatus"`
@@ -491,9 +536,12 @@ type CheckoutItem struct {
 // CheckoutRequest is the full request body for the checkout endpoint.
 type CheckoutRequest struct {
 	ShopID                string         `json:"shopId"`
+	ID                    string         `json:"id,omitempty"`
+	ClientSaleID          string         `json:"clientSaleId,omitempty"`
 	Items                 []CheckoutItem `json:"items"`
 	TotalAmount           float64        `json:"totalAmount"`
 	DiscountAmount        float64        `json:"discountAmount"`
+	DeliveryCharge        float64        `json:"deliveryCharge"`
 	AppliedPromotionID    *string        `json:"appliedPromotionId,omitempty"`
 	PaymentType           string         `json:"paymentType"`
 	CustomerID            *string        `json:"customerId,omitempty"`
@@ -519,7 +567,8 @@ type StockInItem struct {
 
 // StockInRequest is the request body for the stock-in endpoint.
 type StockInRequest struct {
-	Items []StockInItem `json:"items"`
+	ClientOperationID string        `json:"clientOperationId"`
+	Items             []StockInItem `json:"items"`
 }
 
 // StaffCheckoutItem represents a single item in a staff checkout request.
@@ -531,9 +580,12 @@ type StaffCheckoutItem struct {
 
 // StaffCheckoutRequest is the request body for the staff checkout endpoint.
 type StaffCheckoutRequest struct {
-	Items        []StaffCheckoutItem `json:"items"`
-	TotalAmount  float64             `json:"totalAmount"`
-	PaymentType  string              `json:"paymentType"`
-	CustomerID   *string             `json:"customerId,omitempty"`
-	CustomerName *string             `json:"customerName,omitempty"`
+	ID             string              `json:"id,omitempty"`
+	ClientSaleID   string              `json:"clientSaleId,omitempty"`
+	Items          []StaffCheckoutItem `json:"items"`
+	TotalAmount    float64             `json:"totalAmount"`
+	DeliveryCharge float64             `json:"deliveryCharge"`
+	PaymentType    string              `json:"paymentType"`
+	CustomerID     *string             `json:"customerId,omitempty"`
+	CustomerName   *string             `json:"customerName,omitempty"`
 }

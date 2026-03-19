@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -44,15 +45,40 @@ func HandleSearchProductsForStaff(c *fiber.Ctx) error {
 
 	searchTerm := c.Query("searchTerm")
 
-	query := `
-        SELECT ii.id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price, ii.created_at, ii.updated_at
-        FROM inventory_items ii
-        INNER JOIN shop_stock ss ON ii.id = ss.inventory_item_id
-        WHERE ss.shop_id = $1
-        AND (ii.name ILIKE $2 OR ii.sku ILIKE $2)
-    `
+	// Optional filters
+	categoryId := c.Query("categoryId")
+	subcategoryId := c.Query("subcategoryId")
+	brandId := c.Query("brandId")
 
-	rows, err := db.Query(ctx, query, assignedShopID, "%"+searchTerm+"%")
+	baseQuery := `
+		SELECT ii.id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price, ii.created_at, ii.updated_at
+		FROM inventory_items ii
+		INNER JOIN shop_stock ss ON ii.id = ss.inventory_item_id
+		WHERE ss.shop_id = $1
+		AND (ii.name ILIKE $2 OR ii.sku ILIKE $2)
+	`
+
+	args := []interface{}{assignedShopID, "%" + searchTerm + "%"}
+	argPos := 3
+	if categoryId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.category_id = $%d", argPos)
+		args = append(args, categoryId)
+		argPos++
+	}
+	if subcategoryId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.subcategory_id = $%d", argPos)
+		args = append(args, subcategoryId)
+		argPos++
+	}
+	if brandId != "" {
+		baseQuery += fmt.Sprintf(" AND ii.brand_id = $%d", argPos)
+		args = append(args, brandId)
+		argPos++
+	}
+
+	finalQuery := baseQuery + "\n    "
+
+	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
 		log.Printf("Error searching products: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to search products"})
@@ -69,7 +95,7 @@ func HandleSearchProductsForStaff(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items})
 }
 
 // HandleStaffCheckout godoc
@@ -105,6 +131,13 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
+	clientSaleID := strings.TrimSpace(req.ClientSaleID)
+	if clientSaleID == "" {
+		clientSaleID = strings.TrimSpace(req.ID)
+	}
+	if clientSaleID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientSaleId is required"})
+	}
 
 	// If customer name is provided but no customer ID, create a new customer
 	if req.CustomerName != nil && *req.CustomerName != "" && req.CustomerID == nil {
@@ -123,10 +156,21 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientSaleID, "staff_pos_checkout", userID, &assignedShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		sale, err := getFullSaleDetails(ctx, db, clientSaleID)
+		if err == nil {
+			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
 	saleQuery := `
-        INSERT INTO sales (shop_id, merchant_id, staff_id, total_amount, payment_type, payment_status, customer_id)
-        VALUES ($1, $2, $3, $4, $5, 'succeeded', $6)
+	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, delivery_charge, payment_type, payment_status, customer_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'succeeded', $9)
         RETURNING id, sale_date, created_at, updated_at
     `
 	var sale models.Sale
@@ -137,8 +181,9 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	sale.PaymentType = req.PaymentType
 	sale.PaymentStatus = "succeeded"
 	sale.CustomerID = req.CustomerID
+	sale.ID = clientSaleID
 
-	err = tx.QueryRow(ctx, saleQuery, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, sale.PaymentType, req.CustomerID).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
+	err = tx.QueryRow(ctx, saleQuery, sale.ID, clientSaleID, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, req.DeliveryCharge, sale.PaymentType, req.CustomerID).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating sale: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale"})
@@ -204,18 +249,18 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 
 	// Staff checkout doesn't include discount field; set to 0
 	discountAmount := 0.0
-	subtotal := req.TotalAmount + discountAmount
+	subtotal := req.TotalAmount + discountAmount - req.DeliveryCharge
 	taxAmount := 0.0
 
 	invoiceQuery := `
 		INSERT INTO invoices (
 			sale_id, invoice_number, merchant_id, shop_id, customer_id,
-			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			invoice_date, subtotal, discount_amount, tax_amount, delivery_charge, total_amount, payment_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
 	_, err = tx.Exec(ctx, invoiceQuery,
 		sale.ID, invoiceNumber, merchantID, assignedShopID, req.CustomerID,
-		time.Now(), subtotal, discountAmount, taxAmount, req.TotalAmount, "paid",
+		time.Now(), subtotal, discountAmount, taxAmount, req.DeliveryCharge, req.TotalAmount, "paid",
 	)
 	if err != nil {
 		log.Printf("Error creating invoice (staff POS): %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
@@ -227,7 +272,7 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": sale})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
 }
 
 // HandleGetActivePromotionsForStaff godoc
@@ -288,5 +333,5 @@ func HandleGetActivePromotionsForStaff(c *fiber.Ctx) error {
 		promotions = append(promotions, promo)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": promotions})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": promotions})
 }

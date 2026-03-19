@@ -48,6 +48,21 @@ func SetupRoutes(app *fiber.App) {
 	admin.Get("/merchants", handlers.HandleListMerchants)
 	admin.Get("/merchants/:merchantIdOrUserId", handlers.HandleGetMerchantByID)
 
+	// Admin catalog management
+	adminCatalog := admin.Group("/catalog")
+	adminCatalog.Get("/categories", handlers.HandleListAdminCategories)
+	adminCatalog.Post("/categories", handlers.HandleCreateAdminCategory)
+	adminCatalog.Put("/categories/:categoryId", handlers.HandleUpdateAdminCategory)
+	adminCatalog.Delete("/categories/:categoryId", handlers.HandleDeleteAdminCategory)
+	adminCatalog.Get("/subcategories", handlers.HandleListAdminSubcategories)
+	adminCatalog.Post("/subcategories", handlers.HandleCreateAdminSubcategory)
+	adminCatalog.Put("/subcategories/:subcategoryId", handlers.HandleUpdateAdminSubcategory)
+	adminCatalog.Delete("/subcategories/:subcategoryId", handlers.HandleDeleteAdminSubcategory)
+	adminCatalog.Get("/brands", handlers.HandleListAdminBrands)
+	adminCatalog.Post("/brands", handlers.HandleCreateAdminBrand)
+	adminCatalog.Put("/brands/:brandId", handlers.HandleUpdateAdminBrand)
+	adminCatalog.Delete("/brands/:brandId", handlers.HandleDeleteAdminBrand)
+
 	// Shop Management (Admin)
 	adminShops := admin.Group("/shops")
 	adminShops.Get("/", handlers.HandleListShops)
@@ -157,6 +172,22 @@ func SetupRoutes(app *fiber.App) {
 	inventory.Patch("/:itemId/archive", handlers.HandleArchiveInventoryItem)
 	inventory.Patch("/:itemId/unarchive", handlers.HandleUnarchiveInventoryItem)
 
+	// Merchant catalog management (categories, subcategories, brands)
+	catalog := merchant.Group("/catalog")
+	catalog.Get("/options", handlers.HandleGetMerchantCatalogOptions)
+	catalog.Get("/categories", handlers.HandleListMerchantCategories)
+	catalog.Post("/categories", handlers.HandleCreateMerchantCategory)
+	catalog.Put("/categories/:categoryId", handlers.HandleUpdateMerchantCategory)
+	catalog.Delete("/categories/:categoryId", handlers.HandleDeleteMerchantCategory)
+	catalog.Get("/subcategories", handlers.HandleListMerchantSubcategories)
+	catalog.Post("/subcategories", handlers.HandleCreateMerchantSubcategory)
+	catalog.Put("/subcategories/:subcategoryId", handlers.HandleUpdateMerchantSubcategory)
+	catalog.Delete("/subcategories/:subcategoryId", handlers.HandleDeleteMerchantSubcategory)
+	catalog.Get("/brands", handlers.HandleListMerchantBrands)
+	catalog.Post("/brands", handlers.HandleCreateMerchantBrand)
+	catalog.Put("/brands/:brandId", handlers.HandleUpdateMerchantBrand)
+	catalog.Delete("/brands/:brandId", handlers.HandleDeleteMerchantBrand)
+
 	// Merchant Invoices
 	invoices := merchant.Group("/invoices")
 	invoices.Get("/", handlers.HandleListInvoices)
@@ -208,6 +239,14 @@ func SetupRoutes(app *fiber.App) {
 	shopInvoices := shop.Group("/shops/:shopId/invoices")
 	shopInvoices.Get("/", handlers.HandleListShopInvoices)
 	shopInvoices.Get("/:invoiceId", handlers.HandleGetShopInvoiceByID)
+
+	// Shop support tickets (accessible by merchant owners and assigned staff)
+	shopSupport := shop.Group("/support")
+	shopSupport.Get("/tickets", handlers.HandleListShopSupportTickets)
+	shopSupport.Post("/tickets", handlers.HandleCreateShopSupportTicket)
+	shopSupport.Get("/tickets/:ticketId", handlers.HandleGetShopSupportTicketByID)
+	shopSupport.Post("/tickets/:ticketId/replies", handlers.HandleReplyShopSupportTicket)
+	shopSupport.Patch("/tickets/:ticketId/status", handlers.HandleUpdateShopSupportTicketStatus)
 
 	// --- Dashboard-only shop endpoints (infer shop from auth for staff dashboard) ---
 	dashboard := api.Group("/dashboard", middleware.JWTMiddleware)

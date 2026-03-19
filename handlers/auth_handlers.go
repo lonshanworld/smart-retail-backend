@@ -244,9 +244,14 @@ func createJWT(userID, role string) (string, error) {
 func fetchShop(c *fiber.Ctx, shopID string) (*models.Shop, error) {
 	var shop models.Shop
 	var address, phone sql.NullString
-	query := `SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE id = $1`
+	query := `
+		SELECT s.id, s.name, s.merchant_id, s.address, s.phone, s.is_active, s.is_primary,
+		       COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
+		FROM shops s
+		LEFT JOIN payment_settings ps ON ps.shop_id = s.id
+		WHERE s.id = $1`
 	err := database.GetDB().QueryRow(c.Context(), query, shopID).Scan(
-		&shop.ID, &shop.Name, &shop.MerchantID, &address, &phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+		&shop.ID, &shop.Name, &shop.MerchantID, &address, &phone, &shop.IsActive, &shop.IsPrimary, &shop.DeliveryCharge, &shop.CreatedAt, &shop.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

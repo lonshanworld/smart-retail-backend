@@ -35,7 +35,7 @@ func HandleListInvoices(c *fiber.Ctx) error {
 	if shopID != "" {
 		query = `
 			SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
-				   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
+				   invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
 				   total_amount, payment_status, notes, created_at, updated_at
 			FROM invoices
 			WHERE merchant_id = $1 AND shop_id = $2
@@ -69,7 +69,7 @@ func HandleListInvoices(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
 			&invoice.ShopID, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
-			&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount,
+			&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount, &invoice.DeliveryCharge,
 			&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 			&invoice.CreatedAt, &invoice.UpdatedAt,
 		); err != nil {

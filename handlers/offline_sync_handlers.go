@@ -1,12 +1,16 @@
 package handlers
 
 import (
+	"app/config"
 	"app/database"
 	"app/middleware"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v4"
@@ -63,6 +67,13 @@ type BatchSyncResponse struct {
 
 // HandleSyncOfflineSales handles batch syncing of offline sales
 func HandleSyncOfflineSales(c *fiber.Ctx) error {
+	if config.AppConfig.LocalStorageOnly {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"status":  "error",
+			"message": "Cloud sync is disabled in LOCAL_STORAGE_ONLY mode",
+		})
+	}
+
 	db := database.GetDB()
 	ctx := context.Background()
 
@@ -166,13 +177,22 @@ func HandleSyncOfflineSales(c *fiber.Ctx) error {
 		len(syncReq.Sales), successCount, failureCount)
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"status": "success",
-		"data":   response,
+		"status":  "success",
+		"success": true,
+		"data":    response,
 	})
 }
 
 // processSaleSync processes a single offline sale and returns the result
 func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineSale OfflineSaleData) SyncResult {
+	// Wrap pgx transaction to DBTx and call testable function.
+	adapter := pgxTxAdapter{tx: tx}
+	return processSaleSyncWithDB(ctx, adapter, merchantID, offlineSale)
+}
+
+// processSaleSyncWithDB contains the core sync logic over a minimal DBTx interface
+// so unit tests can run without a real database transaction.
+func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offlineSale OfflineSaleData) SyncResult {
 	result := SyncResult{
 		LocalID: offlineSale.ID,
 		Status:  "failed",
@@ -189,7 +209,7 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 	}
 
 	if foundMerchantID != merchantID {
-		errMsg := fmt.Sprintf("Access denied - shop belongs to different merchant")
+		errMsg := "Access denied - shop belongs to different merchant"
 		result.Error = &errMsg
 		log.Printf("❌ [SYNC ITEM] Access denied for sale %s", offlineSale.ID)
 		return result
@@ -197,11 +217,14 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 
 	// Check for duplicate sale using local_id (prevents re-syncing same sale)
 	var existingSaleID string
-	duplicateCheckQuery := "SELECT id FROM sales WHERE notes LIKE $1 AND merchant_id = $2"
-	localIDPattern := fmt.Sprintf("offline_local_id:%s%%", offlineSale.ID)
-	err := tx.QueryRow(ctx, duplicateCheckQuery, localIDPattern, merchantID).Scan(&existingSaleID)
-
-	if err == nil {
+	if offlineSale.ID == "" {
+		errMsg := "Missing client sale id"
+		result.Error = &errMsg
+		log.Printf("❌ [SYNC ITEM] Missing client sale id for sale")
+		return result
+	}
+	duplicateCheckQuery := "SELECT id FROM sales WHERE client_sale_id = $1 AND merchant_id = $2"
+	if err := tx.QueryRow(ctx, duplicateCheckQuery, offlineSale.ID, merchantID).Scan(&existingSaleID); err == nil {
 		// Sale already exists - return success with existing server ID
 		log.Printf("⚠️  [SYNC ITEM] Duplicate detected - Sale %s already synced as %s", offlineSale.ID, existingSaleID)
 		result.Status = "synced"
@@ -209,7 +232,7 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 		now := time.Now()
 		result.ServerTimestamp = &now
 		return result
-	} else if err != pgx.ErrNoRows {
+	} else if !isNoRows(err) {
 		// Real error (not just "no rows")
 		errMsg := fmt.Sprintf("Error checking for duplicates: %v", err)
 		result.Error = &errMsg
@@ -223,9 +246,15 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 		var currentPrice float64
 		priceQuery := "SELECT selling_price FROM inventory_items WHERE id = $1 AND merchant_id = $2"
 		if err := tx.QueryRow(ctx, priceQuery, item.ProductID, merchantID).Scan(&currentPrice); err != nil {
-			errMsg := fmt.Sprintf("Item not found or unavailable: %s", item.ProductID)
+			if isNoRows(err) {
+				errMsg := fmt.Sprintf("Item not found or unavailable: %s", item.ProductID)
+				result.Error = &errMsg
+				log.Printf("❌ [SYNC ITEM] Item validation failed: %v", err)
+				return result
+			}
+			errMsg := fmt.Sprintf("Error fetching price for item %s: %v", item.ProductID, err)
 			result.Error = &errMsg
-			log.Printf("❌ [SYNC ITEM] Item validation failed: %v", err)
+			log.Printf("❌ [SYNC ITEM] Item price query failed: %v", err)
 			return result
 		}
 		itemPrices[item.ProductID] = currentPrice
@@ -235,24 +264,22 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 	saleID := generateUUID()
 	now := time.Now()
 
-	// Store local_id in notes for duplicate tracking
+	// Store local_id in notes for audit/history, but use client_sale_id for real idempotency.
 	notesWithLocalID := fmt.Sprintf("offline_local_id:%s", offlineSale.ID)
 	if offlineSale.Notes != nil && *offlineSale.Notes != "" {
 		notesWithLocalID = fmt.Sprintf("%s | %s", notesWithLocalID, *offlineSale.Notes)
 	}
 
 	createSaleQuery := `
-		INSERT INTO sales (id, shop_id, merchant_id, sale_date, total_amount, payment_type, payment_status, notes, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id
+		INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, sale_date, total_amount, payment_type, payment_status, notes, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
 
-	var returnedID string
-	if err := tx.QueryRow(ctx, createSaleQuery,
-		saleID, offlineSale.ShopID, merchantID, offlineSale.Timestamp,
+	if _, err := tx.Exec(ctx, createSaleQuery,
+		saleID, offlineSale.ID, offlineSale.ShopID, merchantID, offlineSale.Timestamp,
 		offlineSale.TotalAmount, offlineSale.PaymentType, "succeeded",
 		notesWithLocalID, now, now,
-	).Scan(&returnedID); err != nil {
+	); err != nil {
 		errMsg := fmt.Sprintf("Failed to create sale: %v", err)
 		result.Error = &errMsg
 		log.Printf("❌ [SYNC ITEM] Sale creation failed: %v", err)
@@ -269,10 +296,10 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 
 		subtotal := float64(item.Quantity) * item.SellingPriceAtSale
 
-		if err := tx.QueryRow(ctx, createItemQuery,
-			itemID, returnedID, item.ProductID, item.Quantity,
+		if _, err := tx.Exec(ctx, createItemQuery,
+			itemID, saleID, item.ProductID, item.Quantity,
 			item.SellingPriceAtSale, subtotal, now, now,
-		).Scan(); err != nil && err != pgx.ErrNoRows {
+		); err != nil {
 			errMsg := fmt.Sprintf("Failed to create sale item: %v", err)
 			result.Error = &errMsg
 			log.Printf("❌ [SYNC ITEM] Item creation failed: %v", err)
@@ -289,9 +316,9 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 			WHERE id = $3 AND merchant_id = $4
 		`
 
-		if err := tx.QueryRow(ctx, updateStockQuery,
+		if _, err := tx.Exec(ctx, updateStockQuery,
 			item.Quantity, now, item.ProductID, merchantID,
-		).Scan(); err != nil && err != pgx.ErrNoRows {
+		); err != nil {
 			errMsg := fmt.Sprintf("Failed to update inventory: %v", err)
 			result.Error = &errMsg
 			log.Printf("❌ [SYNC ITEM] Inventory update failed: %v", err)
@@ -301,12 +328,22 @@ func processSaleSync(ctx context.Context, tx pgx.Tx, merchantID string, offlineS
 
 	// Success
 	result.Status = "synced"
-	result.ServerID = &returnedID
+	result.ServerID = &saleID
 	now = time.Now()
 	result.ServerTimestamp = &now
-	log.Printf("✅ [SYNC ITEM] Sale %s synced as %s", offlineSale.ID, returnedID)
+	log.Printf("✅ [SYNC ITEM] Sale %s synced as %s", offlineSale.ID, saleID)
 
 	return result
+}
+
+func isNoRows(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	return err.Error() == "no rows in result set"
 }
 
 // logSyncOperation logs the sync operation for audit trail
@@ -325,7 +362,7 @@ func logSyncOperation(ctx context.Context, db *pgxpool.Pool, merchantID, deviceI
 }
 
 // generateUUID generates a UUID (simplified for this example)
-// In production, use a proper UUID library
+// Uses google/uuid for collision-safe IDs.
 func generateUUID() string {
-	return fmt.Sprintf("uuid_%d", time.Now().UnixNano())
+	return uuid.NewString()
 }

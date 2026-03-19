@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -154,7 +155,7 @@ func HandleGetActivePromotionsForPOS(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": promotions})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": promotions})
 }
 
 // HandleSearchProductsForPOS handles searching for products in a specific shop's inventory.
@@ -171,6 +172,11 @@ func HandleSearchProductsForPOS(c *fiber.Ctx) error {
 	shopID := c.Query("shopId")
 	searchTerm := c.Query("searchTerm")
 
+	// optional filters
+	categoryId := c.Query("categoryId")
+	subcategoryId := c.Query("subcategoryId")
+	brandId := c.Query("brandId")
+
 	if shopID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "shopId query parameter is required"})
 	}
@@ -185,25 +191,43 @@ func HandleSearchProductsForPOS(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access to shop denied"})
 	}
 
-	query := `
-        SELECT
-            i.id, i.merchant_id, i.name, i.description, i.sku,
-            i.selling_price, i.original_price, i.low_stock_threshold,
-            i.category, i.supplier_id, i.is_archived, i.created_at, i.updated_at,
-            ss.quantity as stock_quantity
-        FROM inventory_items i
-        INNER JOIN shop_stock ss ON i.id = ss.inventory_item_id
-        WHERE i.merchant_id = $1
-          AND ss.shop_id = $2
-          AND ss.quantity > 0
-          AND i.is_archived = FALSE
-          AND (i.name ILIKE $3 OR i.sku ILIKE $3)
-        ORDER BY i.name ASC
-        LIMIT 50
-    `
-	likeTerm := "%" + searchTerm + "%"
+	// Build dynamic query with optional filters
+	baseQuery := `
+		SELECT
+			i.id, i.merchant_id, i.name, i.description, i.sku,
+			i.selling_price, i.original_price, i.low_stock_threshold,
+			i.category, i.supplier_id, i.is_archived, i.created_at, i.updated_at,
+			ss.quantity as stock_quantity
+		FROM inventory_items i
+		INNER JOIN shop_stock ss ON i.id = ss.inventory_item_id
+		WHERE i.merchant_id = $1
+		  AND ss.shop_id = $2
+		  AND ss.quantity > 0
+		  AND i.is_archived = FALSE
+		  AND (i.name ILIKE $3 OR i.sku ILIKE $3)
+	`
 
-	rows, err := db.Query(ctx, query, merchantID, shopID, likeTerm)
+	args := []interface{}{merchantID, shopID, "%" + searchTerm + "%"}
+	argPos := 4
+	if categoryId != "" {
+		baseQuery += fmt.Sprintf(" AND i.category_id = $%d", argPos)
+		args = append(args, categoryId)
+		argPos++
+	}
+	if subcategoryId != "" {
+		baseQuery += fmt.Sprintf(" AND i.subcategory_id = $%d", argPos)
+		args = append(args, subcategoryId)
+		argPos++
+	}
+	if brandId != "" {
+		baseQuery += fmt.Sprintf(" AND i.brand_id = $%d", argPos)
+		args = append(args, brandId)
+		argPos++
+	}
+
+	finalQuery := baseQuery + "\n        ORDER BY i.name ASC\n        LIMIT 50\n    "
+
+	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
 		log.Printf("Error searching for POS products: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database query failed"})
@@ -249,7 +273,7 @@ func HandleSearchProductsForPOS(c *fiber.Ctx) error {
 		items = append(items, itemWithStock)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items})
 }
 
 // HandleCheckout processes a new sale in a transaction.
@@ -266,6 +290,13 @@ func HandleCheckout(c *fiber.Ctx) error {
 	var req models.CheckoutRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+	clientSaleID := strings.TrimSpace(req.ClientSaleID)
+	if clientSaleID == "" {
+		clientSaleID = strings.TrimSpace(req.ID)
+	}
+	if clientSaleID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientSaleId is required"})
 	}
 
 	// If customer name is provided but no customer ID, create a new customer
@@ -286,6 +317,17 @@ func HandleCheckout(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Could not start database transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientSaleID, "merchant_pos_checkout", merchantID, &req.ShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		sale, err := getSaleByID(ctx, db, clientSaleID)
+		if err == nil {
+			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
+		}
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
 
 	// Validate promotion if provided
 	if req.AppliedPromotionID != nil && *req.AppliedPromotionID != "" {
@@ -318,13 +360,13 @@ func HandleCheckout(c *fiber.Ctx) error {
 	}
 
 	// Create the main Sale record with promotion support
-	saleID := ""
+	saleID := clientSaleID
 	saleQuery := `
-		INSERT INTO sales (shop_id, merchant_id, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, customer_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
+		INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, customer_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id
 	`
 	paymentStatus := "succeeded" // Assume success for now
-	err = tx.QueryRow(ctx, saleQuery, req.ShopID, merchantID, req.TotalAmount, req.AppliedPromotionID, req.DiscountAmount, req.PaymentType, paymentStatus, req.StripePaymentIntentID, req.CustomerID).Scan(&saleID)
+	err = tx.QueryRow(ctx, saleQuery, clientSaleID, clientSaleID, req.ShopID, merchantID, req.TotalAmount, req.DeliveryCharge, req.AppliedPromotionID, req.DiscountAmount, req.PaymentType, paymentStatus, req.StripePaymentIntentID, req.CustomerID).Scan(&saleID)
 	if err != nil {
 		log.Printf("Failed to create sale record: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to record sale"})
@@ -394,18 +436,18 @@ func HandleCheckout(c *fiber.Ctx) error {
 
 	// Calculate invoice amounts
 	discountAmount := req.DiscountAmount
-	subtotal := req.TotalAmount + discountAmount
+	subtotal := req.TotalAmount + discountAmount - req.DeliveryCharge
 	taxAmount := 0.0
 
 	invoiceQuery := `
-		INSERT INTO invoices (
-			sale_id, invoice_number, merchant_id, shop_id, customer_id,
-			invoice_date, subtotal, discount_amount, tax_amount, total_amount, payment_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`
+			INSERT INTO invoices (
+				sale_id, invoice_number, merchant_id, shop_id, customer_id,
+				invoice_date, subtotal, discount_amount, tax_amount, delivery_charge, total_amount, payment_status
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`
 	_, err = tx.Exec(ctx, invoiceQuery,
 		saleID, invoiceNumber, merchantID, req.ShopID, req.CustomerID,
-		time.Now(), subtotal, discountAmount, taxAmount, req.TotalAmount, "paid",
+		time.Now(), subtotal, discountAmount, taxAmount, req.DeliveryCharge, req.TotalAmount, "paid",
 	)
 	if err != nil {
 		log.Printf("Error creating invoice (merchant POS): %v; params: saleID=%s invoiceNumber=%s merchantID=%s shopID=%s customerID=%v subtotal=%.2f discount=%.2f tax=%.2f total=%.2f",
@@ -427,18 +469,18 @@ func HandleCheckout(c *fiber.Ctx) error {
 	if err != nil {
 		log.Printf("Failed to fetch created sale %s: %v", saleID, err)
 		// The sale was successful, so we return a success message even if re-fetch fails.
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "message": "Sale completed successfully"})
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "message": "Sale completed successfully"})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": createdSale})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": createdSale})
 }
 
 // getSaleByID is a helper function to fetch a sale and its items.
 func getSaleByID(ctx context.Context, db *pgxpool.Pool, saleID string) (*models.Sale, error) {
 	var sale models.Sale
-	saleQuery := `SELECT id, shop_id, merchant_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at FROM sales WHERE id = $1`
+	saleQuery := `SELECT id, shop_id, merchant_id, sale_date, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at FROM sales WHERE id = $1`
 	err := db.QueryRow(ctx, saleQuery, saleID).Scan(
-		&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.SaleDate, &sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt,
+		&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.SaleDate, &sale.TotalAmount, &sale.DeliveryCharge, &sale.AppliedPromotionID, &sale.DiscountAmount, &sale.PaymentType, &sale.PaymentStatus, &sale.StripePaymentIntentID, &sale.Notes, &sale.CreatedAt, &sale.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

@@ -95,15 +95,19 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	merchantId := claims.UserID
 
 	type CreateStaffRequest struct {
-		Name           string  `json:"name"`
-		Email          string  `json:"email"`
-		Password       string  `json:"password"`
-		AssignedShopID *string `json:"assignedShopId,omitempty"`
+		Name              string  `json:"name"`
+		Email             string  `json:"email"`
+		Password          string  `json:"password"`
+		AssignedShopID    *string `json:"assignedShopId,omitempty"`
+		ClientOperationID string  `json:"clientOperationId"`
 	}
 
 	var req CreateStaffRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+	if strings.TrimSpace(req.ClientOperationID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
 	}
 
 	log.Printf("Parsed request: name=%s, email=%s, assignedShopId=%v", req.Name, req.Email, req.AssignedShopID)
@@ -144,7 +148,19 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	`
 
 	var newStaff models.User
-	err = db.QueryRow(ctx, query, req.Name, req.Email, string(hashedPassword), merchantId, assignedShopID).Scan(
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_create_staff", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
+	err = tx.QueryRow(ctx, query, req.Name, req.Email, string(hashedPassword), merchantId, assignedShopID).Scan(
 		&newStaff.ID, &newStaff.Name, &newStaff.Email, &newStaff.Role, &newStaff.IsActive, &newStaff.MerchantID, &newStaff.AssignedShopID, &newStaff.CreatedAt, &newStaff.UpdatedAt,
 	)
 
@@ -154,6 +170,9 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create staff member."})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": newStaff})
 }
 
@@ -182,6 +201,25 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	var req UpdateStaffRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
+	}
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_update_staff", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
 	}
 
 	var setClauses []string
@@ -223,13 +261,16 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 	args = append(args, staffId, merchantId)
 
 	var updatedStaff models.User
-	if err = db.QueryRow(ctx, query, args...).Scan(
+	if err = tx.QueryRow(ctx, query, args...).Scan(
 		&updatedStaff.ID, &updatedStaff.Name, &updatedStaff.Email, &updatedStaff.Role, &updatedStaff.IsActive, &updatedStaff.MerchantID, &updatedStaff.AssignedShopID, &updatedStaff.CreatedAt, &updatedStaff.UpdatedAt,
 	); err != nil {
 		log.Printf("Error updating merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update staff member."})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 	return c.JSON(fiber.Map{"status": "success", "data": updatedStaff})
 }
 
@@ -247,10 +288,29 @@ func HandleDeleteMerchantStaff(c *fiber.Ctx) error {
 	}
 	merchantId := claims.UserID
 	staffId := c.Params("staffId")
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_delete_staff", merchantId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success"})
+	}
 
 	query := "DELETE FROM users WHERE id = $1 AND merchant_id = $2 AND role = 'staff'"
 
-	res, err := db.Exec(ctx, query, staffId, merchantId)
+	res, err := tx.Exec(ctx, query, staffId, merchantId)
 	if err != nil {
 		log.Printf("Error deleting merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -260,6 +320,9 @@ func HandleDeleteMerchantStaff(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Staff member not found or you do not have permission to delete it."})
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success"})
 }
 

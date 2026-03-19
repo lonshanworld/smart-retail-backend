@@ -101,6 +101,9 @@ func HandleStockIn(c *fiber.Ctx) error {
 	if err = c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
+	if req.ClientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
 
 	var assignedShopID string
 	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
@@ -113,6 +116,14 @@ func HandleStockIn(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
+
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "staff_stock_in", userID, &assignedShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start inventory operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Stock-in already processed"})
+	}
 
 	for _, item := range req.Items {
 		// Get current quantity

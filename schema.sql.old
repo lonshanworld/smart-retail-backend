@@ -113,6 +113,16 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     notes TEXT
 );
 
+-- Client-generated inventory operation IDs used for idempotent stock mutations
+CREATE TABLE IF NOT EXISTS inventory_operations (
+    id SERIAL PRIMARY KEY,
+    client_operation_id TEXT UNIQUE NOT NULL,
+    operation_type VARCHAR(80) NOT NULL,
+    actor_id INTEGER NOT NULL REFERENCES merchants(id) ON DELETE RESTRICT,
+    shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Customers associated with a specific shop
 CREATE TABLE IF NOT EXISTS shop_customers (
     id SERIAL PRIMARY KEY,
@@ -147,6 +157,7 @@ CREATE TABLE IF NOT EXISTS promotions (
 -- Sales transactions
 CREATE TABLE IF NOT EXISTS sales (
     id SERIAL PRIMARY KEY,
+    client_sale_id TEXT UNIQUE,
     shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
     merchant_id INTEGER NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
     staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL,

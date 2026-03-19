@@ -49,6 +49,25 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 	}
 	userId := claims.UserID
 
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_update_profile", userId, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return HandleGetMerchantProfile(c)
+	}
 	type UpdateRequest struct {
 		Name     string `json:"name,omitempty"`
 		Password string `json:"password,omitempty"`
@@ -79,21 +98,36 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 		paramIndex++
 	}
 
+	// If nothing to update, return current profile
 	if len(setClauses) == 0 {
-		// Nothing to update, so just return the current profile
-		return HandleGetMerchantProfile(c)
+		var current models.User
+		selectQuery := "SELECT id, name, email, phone, role, created_at, updated_at FROM users WHERE id = $1 AND role = 'merchant'"
+		if err := tx.QueryRow(ctx, selectQuery, userId).Scan(&current.ID, &current.Name, &current.Email, &current.Phone, &current.Role, &current.CreatedAt, &current.UpdatedAt); err != nil {
+			if err == sql.ErrNoRows {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit operation"})
+		}
+		return c.JSON(fiber.Map{"status": "success", "data": current})
 	}
 
 	setClauses = append(setClauses, "updated_at = NOW()")
-
-	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d AND role = 'merchant' RETURNING id, name, email, phone, role, created_at, updated_at", strings.Join(setClauses, ", "), paramIndex)
+	queryUpdate := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d AND role = 'merchant' RETURNING id, name, email, phone, role, created_at, updated_at", strings.Join(setClauses, ", "), paramIndex)
 	args = append(args, userId)
 
 	var updatedUser models.User
-	err = db.QueryRow(ctx, query, args...).Scan(&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Phone, &updatedUser.Role, &updatedUser.CreatedAt, &updatedUser.UpdatedAt)
-
-	if err != nil {
+	if err := tx.QueryRow(ctx, queryUpdate, args...).Scan(&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Phone, &updatedUser.Role, &updatedUser.CreatedAt, &updatedUser.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update profile"})
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit operation"})
 	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": updatedUser})

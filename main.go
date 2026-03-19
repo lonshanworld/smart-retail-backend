@@ -4,6 +4,7 @@ import (
 	"app/config"
 	"app/database"
 	"app/routes"
+	"context"
 	"log"
 	"os"
 
@@ -32,9 +33,16 @@ func main() {
 
 	// Set up the application configuration
 	config.AppConfig.JWTSecret = jwtSecret
+	config.AppConfig.LocalStorageOnly = config.LoadBoolEnv("LOCAL_STORAGE_ONLY")
+	if config.AppConfig.LocalStorageOnly {
+		log.Println("LOCAL_STORAGE_ONLY=true: cloud sync endpoints are disabled")
+	}
 
 	// Initialize database
 	database.InitDB(databaseURL)
+	if err := database.EnsureSyncSchema(context.Background()); err != nil {
+		log.Fatalf("failed to apply sync schema migrations: %v", err)
+	}
 	defer database.CloseDB()
 
 	app := fiber.New()

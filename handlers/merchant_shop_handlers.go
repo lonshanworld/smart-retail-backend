@@ -11,7 +11,6 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 )
 
-// HandleListMerchantShops lists all shops belonging to the authenticated merchant.
 func HandleListMerchantShops(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
@@ -22,7 +21,13 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	}
 	merchantID := claims.UserID
 
-	query := `SELECT id, name, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE merchant_id = $1`
+	query := `
+		SELECT s.id, s.name, s.address, s.phone, s.is_active, s.is_primary,
+			   COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
+		FROM shops s
+		LEFT JOIN payment_settings ps ON ps.shop_id = s.id
+		WHERE s.merchant_id = $1`
+
 	rows, err := db.Query(ctx, query, merchantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shops"})
@@ -32,10 +37,10 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	shops := make([]models.Shop, 0)
 	for rows.Next() {
 		var shop models.Shop
-		if err := rows.Scan(&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt); err != nil {
+		if err := rows.Scan(&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.DeliveryCharge, &shop.CreatedAt, &shop.UpdatedAt); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to scan shop data"})
 		}
-		shop.MerchantID = merchantID // Set the merchant ID from the token
+		shop.MerchantID = merchantID
 		shops = append(shops, shop)
 	}
 
@@ -47,30 +52,59 @@ func HandleUpdateMerchantShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(*models.JwtClaims)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
 	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_update_shop", merchantID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to claim operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusNoContent).JSON(fiber.Map{"status": "success"})
+	}
+
 	var req models.Shop
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
 
 	query := `
-        UPDATE shops 
-        SET name = $1, address = $2, phone = $3 
-        WHERE id = $4 AND merchant_id = $5
-        RETURNING id, name, address, phone, is_active, is_primary, created_at, updated_at
-    `
+		UPDATE shops
+		SET name = $1, address = $2, phone = $3
+		WHERE id = $4 AND merchant_id = $5
+		RETURNING id, name, address, phone, is_active, is_primary, created_at, updated_at
+	`
+
 	var shop models.Shop
-	err := db.QueryRow(ctx, query, req.Name, req.Address, req.Phone, shopID, merchantID).Scan(
+	err = tx.QueryRow(ctx, query, req.Name, req.Address, req.Phone, shopID, merchantID).Scan(
 		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
 	)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update shop"})
 	}
 	shop.MerchantID = merchantID
+
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
 
 	return c.JSON(fiber.Map{"status": "success", "data": shop})
 }
@@ -80,19 +114,46 @@ func HandleDeleteMerchantShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(*models.JwtClaims)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
 	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
 
-	query := "DELETE FROM shops WHERE id = $1 AND merchant_id = $2"
-	_, err := db.Exec(ctx, query, shopID, merchantID)
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+
+	tx, err := db.Begin(ctx)
 	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_delete_shop", merchantID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to claim operation"})
+	}
+	if !claimed {
+		return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"id": shopID}})
+	}
+
+	query := "DELETE FROM shops WHERE id = $1 AND merchant_id = $2"
+	if _, err := tx.Exec(ctx, query, shopID, merchantID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to delete shop"})
 	}
 
-	return c.Status(204).JSON(fiber.Map{"status": "success"})
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // HandleListProductsForShop fetches all inventory items associated with a specific shop.
@@ -193,11 +254,26 @@ func HandleSetPrimaryShop(c *fiber.Ctx) error {
 
 	shopID := c.Params("shopId")
 
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if clientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
+
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, clientOperationID, "merchant_set_primary_shop", merchantID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to claim operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusNoContent).JSON(fiber.Map{"status": "success"})
+	}
 
 	// Reset all other shops for this merchant to not be primary
 	resetQuery := "UPDATE shops SET is_primary = FALSE WHERE merchant_id = $1"

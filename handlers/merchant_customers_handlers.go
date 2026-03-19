@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -118,11 +119,26 @@ func HandleCreateCustomer(c *fiber.Ctx) error {
 	if req.ShopID == "" || req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Shop ID and name are required"})
 	}
+	if strings.TrimSpace(req.ClientOperationID) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_create_customer", merchantId, &req.ShopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "message": "Operation already processed"})
+	}
 
 	// Check for existing customer
 	var existingID string
 	checkQuery := "SELECT id FROM shop_customers WHERE shop_id = $1 AND phone = $2 AND email = $3"
-	err = db.QueryRow(ctx, checkQuery, req.ShopID, req.Phone, req.Email).Scan(&existingID)
+	err = tx.QueryRow(ctx, checkQuery, req.ShopID, req.Phone, req.Email).Scan(&existingID)
 	if err != nil && err != sql.ErrNoRows {
 		log.Printf("Error checking for existing customer: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -137,13 +153,16 @@ func HandleCreateCustomer(c *fiber.Ctx) error {
         VALUES ($1, $2, $3, $4, $5)
         RETURNING id, created_at, updated_at
     `
-	err = db.QueryRow(ctx, createQuery, req.ShopID, merchantId, req.Name, req.Phone, req.Email).Scan(&req.ID, &req.CreatedAt, &req.UpdatedAt)
+	err = tx.QueryRow(ctx, createQuery, req.ShopID, merchantId, req.Name, req.Phone, req.Email).Scan(&req.ID, &req.CreatedAt, &req.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating customer: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to create customer"})
 	}
 
 	req.MerchantID = merchantId
+	if err := tx.Commit(ctx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to commit transaction"})
+	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "data": req})
 }

@@ -31,7 +31,8 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 	role := claims.Role
 	userId := claims.UserID
 
-	if role == "merchant" {
+	switch role {
+	case "merchant":
 		// verify merchant owns the shop
 		var ownerId string
 		if err := db.QueryRow(ctx, "SELECT merchant_id FROM shops WHERE id = $1", shopId).Scan(&ownerId); err != nil {
@@ -45,7 +46,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 			log.Printf("Merchant %s attempted to access invoices for shop %s owned by %s", userId, shopId, ownerId)
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Merchant not authorized for this shop"})
 		}
-	} else if role == "staff" {
+	case "staff":
 		// verify staff assigned to this shop
 		var assignedShopID *string
 		if err := db.QueryRow(ctx, "SELECT assigned_shop_id FROM users WHERE id = $1", userId).Scan(&assignedShopID); err != nil {
@@ -56,7 +57,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 			log.Printf("Staff %s attempted to access invoices for shop %s but is assigned to %v", userId, shopId, assignedShopID)
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Staff not authorized for this shop"})
 		}
-	} else {
+	default:
 		// other roles (admin) can be allowed if needed — for now allow admin
 		if role != "admin" {
 			log.Printf("Access denied for role: %s", role)
@@ -69,9 +70,9 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 
 	query := `
-        SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
-               invoice_date, due_date, subtotal, discount_amount, tax_amount,
-               total_amount, payment_status, notes, created_at, updated_at
+		 SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
+			 total_amount, payment_status, notes, created_at, updated_at
         FROM invoices
         WHERE shop_id = $1
         ORDER BY invoice_date DESC
@@ -91,7 +92,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&inv.ID, &inv.SaleID, &inv.InvoiceNumber, &inv.MerchantID,
 			&inv.ShopID, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
-			&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount,
+			&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount, &inv.DeliveryCharge,
 			&inv.TotalAmount, &inv.PaymentStatus, &inv.Notes,
 			&inv.CreatedAt, &inv.UpdatedAt,
 		); err != nil {
@@ -177,9 +178,9 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 	// get invoice's shop_id and merchant_id
 	var inv models.Invoice
 	query := `
-        SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
-               invoice_date, due_date, subtotal, discount_amount, tax_amount,
-               total_amount, payment_status, notes, created_at, updated_at
+		 SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
+			 total_amount, payment_status, notes, created_at, updated_at
         FROM invoices
         WHERE id = $1
     `
@@ -322,7 +323,7 @@ func HandleListStaffInvoices(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&inv.ID, &inv.SaleID, &inv.InvoiceNumber, &inv.MerchantID,
 			&inv.ShopID, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
-			&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount,
+			&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount, &inv.DeliveryCharge,
 			&inv.TotalAmount, &inv.PaymentStatus, &inv.Notes,
 			&inv.CreatedAt, &inv.UpdatedAt,
 		); err != nil {
@@ -374,16 +375,16 @@ func HandleGetStaffInvoiceByID(c *fiber.Ctx) error {
 	// fetch invoice
 	var inv models.Invoice
 	query := `
-        SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
-               invoice_date, due_date, subtotal, discount_amount, tax_amount,
-               total_amount, payment_status, notes, created_at, updated_at
+		 SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
+			 total_amount, payment_status, notes, created_at, updated_at
         FROM invoices
         WHERE id = $1
     `
 	if err := db.QueryRow(ctx, query, invoiceId).Scan(
 		&inv.ID, &inv.SaleID, &inv.InvoiceNumber, &inv.MerchantID,
 		&inv.ShopID, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
-		&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount,
+		&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount, &inv.DeliveryCharge,
 		&inv.TotalAmount, &inv.PaymentStatus, &inv.Notes,
 		&inv.CreatedAt, &inv.UpdatedAt,
 	); err != nil {
