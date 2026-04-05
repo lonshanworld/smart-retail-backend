@@ -2,7 +2,8 @@ package models
 
 // AIAssistantRequest defines the structure for requests to the AI assistant.
 type AIAssistantRequest struct {
-	Prompt string `json:"prompt"`
+	Prompt   string `json:"prompt"`
+	Provider string `json:"provider,omitempty"`
 }
 
 // BestSeller represents a best-selling product.
@@ -19,6 +20,6 @@ type ShopSales struct {
 
 // PeakHour represents a peak sales hour.
 type PeakHour struct {
-	Hour      int `json:"hour"`
+	Hour       int `json:"hour"`
 	TotalSales int `json:"total_sales"`
 }

@@ -252,10 +252,12 @@ type Sale struct {
 // Invoice represents an invoice generated for a sale.
 type Invoice struct {
 	ID             string     `json:"id"`
-	SaleID         string     `json:"saleId"`
+	SaleID         string     `json:"-"`
 	InvoiceNumber  string     `json:"invoiceNumber"`
 	MerchantID     string     `json:"merchantId"`
-	ShopID         string     `json:"shopId"`
+	ShopID         string     `json:"-"`
+	ShopName       string     `json:"shopName"`
+	CheckoutTime   time.Time  `json:"checkoutTime"`
 	CustomerID     *string    `json:"customerId,omitempty"`
 	InvoiceDate    time.Time  `json:"invoiceDate"`
 	DueDate        *time.Time `json:"dueDate,omitempty"`
@@ -366,14 +368,20 @@ type MerchantDashboardSummary struct {
 
 // CombinedStockItem represents a flattened view of an inventory item in a specific shop.
 type CombinedStockItem struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	SKU           *string  `json:"sku,omitempty"`
-	Quantity      int      `json:"quantity"`
-	SellingPrice  float64  `json:"sellingPrice"`
-	OriginalPrice *float64 `json:"originalPrice,omitempty"`
-	ShopName      string   `json:"shopName"`
-	ShopID        string   `json:"shopId"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	SKU            *string      `json:"sku,omitempty"`
+	Quantity       int          `json:"quantity"`
+	SellingPrice   float64      `json:"sellingPrice"`
+	OriginalPrice  *float64     `json:"originalPrice,omitempty"`
+	ShopName       string       `json:"shopName"`
+	ShopID         string       `json:"shopId"`
+	CategoryID     *string      `json:"categoryId,omitempty"`
+	SubcategoryID  *string      `json:"subcategoryId,omitempty"`
+	BrandID        *string      `json:"brandId,omitempty"`
+	CategoryObj    *Category    `json:"categoryObj,omitempty"`
+	SubcategoryObj *Subcategory `json:"subcategoryObj,omitempty"`
+	BrandObj       *Brand       `json:"brandObj,omitempty"`
 }
 
 // --- Paginated Responses ---
@@ -483,7 +491,7 @@ type ShopStockItem struct {
 }
 
 type Receipt struct {
-	SaleID         string        `json:"saleId"`
+	SaleID         string        `json:"-"`
 	SaleDate       time.Time     `json:"saleDate"`
 	ShopName       string        `json:"shopName"`
 	ShopAddress    string        `json:"shopAddress"`
@@ -580,12 +588,14 @@ type StaffCheckoutItem struct {
 
 // StaffCheckoutRequest is the request body for the staff checkout endpoint.
 type StaffCheckoutRequest struct {
-	ID             string              `json:"id,omitempty"`
-	ClientSaleID   string              `json:"clientSaleId,omitempty"`
-	Items          []StaffCheckoutItem `json:"items"`
-	TotalAmount    float64             `json:"totalAmount"`
-	DeliveryCharge float64             `json:"deliveryCharge"`
-	PaymentType    string              `json:"paymentType"`
-	CustomerID     *string             `json:"customerId,omitempty"`
-	CustomerName   *string             `json:"customerName,omitempty"`
+	ID                 string              `json:"id,omitempty"`
+	ClientSaleID       string              `json:"clientSaleId,omitempty"`
+	Items              []StaffCheckoutItem `json:"items"`
+	TotalAmount        float64             `json:"totalAmount"`
+	DiscountAmount     float64             `json:"discountAmount"`
+	AppliedPromotionID *string             `json:"appliedPromotionId,omitempty"`
+	DeliveryCharge     float64             `json:"deliveryCharge"`
+	PaymentType        string              `json:"paymentType"`
+	CustomerID         *string             `json:"customerId,omitempty"`
+	CustomerName       *string             `json:"customerName,omitempty"`
 }

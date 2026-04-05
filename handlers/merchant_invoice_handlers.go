@@ -34,23 +34,25 @@ func HandleListInvoices(c *fiber.Ctx) error {
 
 	if shopID != "" {
 		query = `
-			SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 				   invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
 				   total_amount, payment_status, notes, created_at, updated_at
-			FROM invoices
-			WHERE merchant_id = $1 AND shop_id = $2
-			ORDER BY invoice_date DESC
+			FROM invoices i
+			JOIN shops s ON s.id = i.shop_id
+			WHERE i.merchant_id = $1 AND i.shop_id = $2
+			ORDER BY i.invoice_date DESC
 			LIMIT $3 OFFSET $4
 		`
 		args = []interface{}{merchantID, shopID, pageSize, offset}
 	} else {
 		query = `
-			SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 				   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
 				   total_amount, payment_status, notes, created_at, updated_at
-			FROM invoices
-			WHERE merchant_id = $1
-			ORDER BY invoice_date DESC
+			FROM invoices i
+			JOIN shops s ON s.id = i.shop_id
+			WHERE i.merchant_id = $1
+			ORDER BY i.invoice_date DESC
 			LIMIT $2 OFFSET $3
 		`
 		args = []interface{}{merchantID, pageSize, offset}
@@ -68,7 +70,7 @@ func HandleListInvoices(c *fiber.Ctx) error {
 		var invoice models.Invoice
 		if err := rows.Scan(
 			&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
-			&invoice.ShopID, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
+			&invoice.ShopID, &invoice.ShopName, &invoice.CheckoutTime, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
 			&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount, &invoice.DeliveryCharge,
 			&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 			&invoice.CreatedAt, &invoice.UpdatedAt,
@@ -160,17 +162,18 @@ func HandleGetInvoiceByID(c *fiber.Ctx) error {
 	invoiceID := c.Params("invoiceId")
 
 	query := `
-		SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+		SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 			   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
 			   total_amount, payment_status, notes, created_at, updated_at
-		FROM invoices
-		WHERE id = $1 AND merchant_id = $2
+		FROM invoices i
+		JOIN shops s ON s.id = i.shop_id
+		WHERE i.id = $1 AND i.merchant_id = $2
 	`
 
 	var invoice models.Invoice
 	if err := db.QueryRow(ctx, query, invoiceID, merchantID).Scan(
 		&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
-		&invoice.ShopID, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
+		&invoice.ShopID, &invoice.ShopName, &invoice.CheckoutTime, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
 		&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount,
 		&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 		&invoice.CreatedAt, &invoice.UpdatedAt,
@@ -231,17 +234,18 @@ func HandleGetInvoiceBySaleID(c *fiber.Ctx) error {
 	saleID := c.Params("saleId")
 
 	query := `
-		SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+		SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 			   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
 			   total_amount, payment_status, notes, created_at, updated_at
-		FROM invoices
+		FROM invoices i
+		JOIN shops s ON s.id = i.shop_id
 		WHERE sale_id = $1 AND merchant_id = $2
 	`
 
 	var invoice models.Invoice
 	if err := db.QueryRow(ctx, query, saleID, merchantID).Scan(
 		&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
-		&invoice.ShopID, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
+		&invoice.ShopID, &invoice.ShopName, &invoice.CheckoutTime, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
 		&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount,
 		&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 		&invoice.CreatedAt, &invoice.UpdatedAt,

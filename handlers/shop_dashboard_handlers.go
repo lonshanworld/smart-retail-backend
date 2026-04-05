@@ -120,7 +120,7 @@ func HandleDashboardGetItems(c *fiber.Ctx) error {
         FROM shop_stock ss
         JOIN inventory_items ii ON ss.inventory_item_id = ii.id
         WHERE ss.shop_id = $1
-        ORDER BY ii.name ASC
+		ORDER BY ii.created_at DESC, ii.id DESC
     `
 	rows, err := db.Query(ctx, query, shopID)
 	if err != nil {

@@ -29,18 +29,19 @@ type DailyForecast struct {
 // AiAnalysis contains the qualitative insights from the Gemini model.
 type AiAnalysis struct {
 	Summary         string   `json:"summary"`
+	AnalysisHTML    string   `json:"analysisHtml,omitempty"`
 	PositiveFactors []string `json:"positive_factors"`
 	NegativeFactors []string `json:"negative_factors"`
 }
 
 // SalesForecastResponse is the complete structure for the sales forecast API response.
 type SalesForecastResponse struct {
-	ReportName     string         `json:"reportName"`
-	GeneratedAt    time.Time      `json:"generatedAt"`
-	ProductName    string         `json:"productName"`
-	ShopName       string         `json:"shopName"`
-	CurrentStock   int            `json:"currentStock"`
-	ForecastPeriod ForecastPeriod `json:"forecastPeriod"`
+	ReportName     string          `json:"reportName"`
+	GeneratedAt    time.Time       `json:"generatedAt"`
+	ProductName    string          `json:"productName"`
+	ShopName       string          `json:"shopName"`
+	CurrentStock   int             `json:"currentStock"`
+	ForecastPeriod ForecastPeriod  `json:"forecastPeriod"`
 	DailyForecast  []DailyForecast `json:"dailyForecast"`
-	AiAnalysis     AiAnalysis     `json:"aiAnalysis"`
+	AiAnalysis     AiAnalysis      `json:"aiAnalysis"`
 }

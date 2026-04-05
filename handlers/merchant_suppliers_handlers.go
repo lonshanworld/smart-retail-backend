@@ -55,7 +55,7 @@ func HandleListMerchantSuppliers(c *fiber.Ctx) error {
 	query := fmt.Sprintf(`
 		SELECT id, merchant_id, name, contact_name, contact_email, contact_phone, address, notes, created_at, updated_at
 		%s
-		ORDER BY name
+		ORDER BY created_at DESC, id DESC
 		LIMIT $%d OFFSET $%d`, baseQuery, argCount, argCount+1)
 
 	paginatedArgs := append(args, pageSize, offset)
@@ -329,7 +329,7 @@ func HandleGetSuppliersForSelection(c *fiber.Ctx) error {
 	}
 	merchantId := claims.UserID
 
-	query := "SELECT id, name FROM suppliers WHERE merchant_id = $1 ORDER BY name"
+	query := "SELECT id, name FROM suppliers WHERE merchant_id = $1 ORDER BY created_at DESC, id DESC"
 
 	rows, err := db.Query(ctx, query, merchantId)
 	if err != nil {

@@ -158,7 +158,7 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
         SELECT id, merchant_id, name, address, phone, is_active, is_primary, created_at, updated_at
         FROM shops
         WHERE merchant_id = $1
-        ORDER BY is_primary DESC, created_at ASC
+	ORDER BY created_at DESC, is_primary DESC
     `
 
 	rows, err := db.Query(ctx, shopsQuery, merchantIdOrUserId)

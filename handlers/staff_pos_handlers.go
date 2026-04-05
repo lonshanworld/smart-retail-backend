@@ -169,8 +169,8 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	}
 
 	saleQuery := `
-	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, delivery_charge, payment_type, payment_status, customer_id)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'succeeded', $9)
+	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, discount_amount, applied_promotion_id, delivery_charge, payment_type, payment_status, customer_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'succeeded', $11)
         RETURNING id, sale_date, created_at, updated_at
     `
 	var sale models.Sale
@@ -178,12 +178,14 @@ func HandleStaffCheckout(c *fiber.Ctx) error {
 	sale.MerchantID = merchantID
 	sale.StaffID = &userID
 	sale.TotalAmount = req.TotalAmount
+	sale.DiscountAmount = &req.DiscountAmount
+	sale.AppliedPromotionID = req.AppliedPromotionID
 	sale.PaymentType = req.PaymentType
 	sale.PaymentStatus = "succeeded"
 	sale.CustomerID = req.CustomerID
 	sale.ID = clientSaleID
 
-	err = tx.QueryRow(ctx, saleQuery, sale.ID, clientSaleID, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, req.DeliveryCharge, sale.PaymentType, req.CustomerID).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
+	err = tx.QueryRow(ctx, saleQuery, sale.ID, clientSaleID, sale.ShopID, sale.MerchantID, sale.StaffID, sale.TotalAmount, req.DiscountAmount, req.AppliedPromotionID, req.DeliveryCharge, sale.PaymentType, req.CustomerID).Scan(&sale.ID, &sale.SaleDate, &sale.CreatedAt, &sale.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating sale: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create sale"})

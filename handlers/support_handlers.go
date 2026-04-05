@@ -152,7 +152,7 @@ func fetchSupportMessages(ctx context.Context, ticketID string) ([]supportMessag
 		`SELECT id, ticket_id, sender_role, content, is_admin_reply, created_at
 		 FROM support_messages
 		 WHERE ticket_id = $1
-		 ORDER BY created_at ASC`,
+			 ORDER BY created_at DESC`,
 		ticketID,
 	)
 	if err != nil {

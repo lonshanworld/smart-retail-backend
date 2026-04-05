@@ -67,7 +67,7 @@ func HandleSearchShopProducts(c *fiber.Ctx) error {
 		argPos++
 	}
 
-	finalQuery := baseQuery + "\n        ORDER BY ii.name ASC\n        LIMIT 50\n    "
+	finalQuery := baseQuery + "\n        ORDER BY ii.created_at DESC, ii.id DESC\n        LIMIT 50\n    "
 
 	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
@@ -229,11 +229,11 @@ func getMerchantIDFromShopID(ctx context.Context, db *pgxpool.Pool, shopID strin
 func createSaleRecord(ctx context.Context, tx pgx.Tx, shopID, merchantID, staffID, clientSaleID string, req models.CheckoutRequest) (string, error) {
 	var saleID string
 	query := `
-	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, delivery_charge, payment_type, customer_id, sale_date)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, discount_amount, applied_promotion_id, delivery_charge, payment_type, customer_id, sale_date)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id
     `
-	err := tx.QueryRow(ctx, query, clientSaleID, clientSaleID, shopID, merchantID, staffID, req.TotalAmount, req.DeliveryCharge, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
+	err := tx.QueryRow(ctx, query, clientSaleID, clientSaleID, shopID, merchantID, staffID, req.TotalAmount, req.DiscountAmount, req.AppliedPromotionID, req.DeliveryCharge, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
 	return saleID, err
 }
 

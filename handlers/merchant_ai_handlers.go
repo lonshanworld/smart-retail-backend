@@ -8,12 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // HandleAIAssistant provides AI-powered insights based on a user's prompt.
@@ -31,14 +28,16 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 		return err
 	}
 	merchantID := claims.UserID
+	provider := resolveAIProvider(req.Provider)
 
 	log.Printf("🤖 [AI ASSISTANT] Starting request")
 	log.Printf("   Merchant ID: %s", merchantID)
+	log.Printf("   Provider: %s", provider)
 	log.Printf("   User Prompt: %s", req.Prompt)
 
 	// 1. Use AI to generate SQL query from natural language
 	log.Printf("🔄 [AI ASSISTANT] Step 1: Generating SQL from prompt...")
-	sqlQuery, err := generateSQLFromPrompt(req.Prompt, merchantID)
+	sqlQuery, err := generateSQLFromPrompt(req.Prompt, merchantID, provider)
 	if err != nil {
 		log.Printf("❌ [AI ASSISTANT] Failed to generate SQL: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
@@ -64,7 +63,7 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 
 	// 4. Use AI to format the results in a human-readable way
 	log.Printf("🔄 [AI ASSISTANT] Step 4: Formatting results with AI...")
-	analysis, err := formatResultsWithAI(req.Prompt, queryResult)
+	analysisHTML, err := formatResultsWithAI(req.Prompt, queryResult, provider)
 	if err != nil {
 		log.Printf("❌ [AI ASSISTANT] Failed to format results: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
@@ -72,11 +71,11 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 	log.Printf("✅ [AI ASSISTANT] Analysis generated successfully")
 
 	log.Printf("🎉 [AI ASSISTANT] Request completed successfully")
-	return c.JSON(fiber.Map{"success": true, "analysis": analysis, "sql": sqlQuery, "data": queryResult})
+	return c.JSON(fiber.Map{"success": true, "analysis": stripHTMLTags(analysisHTML), "analysis_html": analysisHTML, "analysis_format": "html", "provider": string(provider), "sql": sqlQuery, "data": queryResult})
 }
 
 // generateSQLFromPrompt uses Gemini to convert natural language to SQL
-func generateSQLFromPrompt(prompt string, merchantID string) (string, error) {
+func generateSQLFromPrompt(prompt string, merchantID string, provider aiProvider) (string, error) {
 	log.Printf("   🔍 [SQL GEN] Fetching available tables from database...")
 	ctx := context.Background()
 	db := database.GetDB()
@@ -103,17 +102,6 @@ func generateSQLFromPrompt(prompt string, merchantID string) (string, error) {
 		}
 		log.Printf("   ✅ [SQL GEN] Available tables: %v", tableNames)
 	}
-
-	log.Printf("   🔍 [SQL GEN] Creating AI client...")
-	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
-	if err != nil {
-		log.Printf("   ❌ [SQL GEN] Failed to create AI client: %v", err)
-		return "", fmt.Errorf("failed to create AI client: %w", err)
-	}
-	defer client.Close()
-	log.Printf("   ✅ [SQL GEN] AI client created")
-
-	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
 	// Database schema information (from actual schema.sql)
 	schemaInfo := `
@@ -158,18 +146,13 @@ The query MUST include WHERE merchant_id = '%s' for security.`, schemaInfo, prom
 
 	log.Printf("   🔍 [SQL GEN] Sending prompt to Gemini AI...")
 	log.Printf("   📝 [SQL GEN] User question: %s", prompt)
-	resp, err := model.GenerateContent(ctx, genai.Text(sqlPrompt))
+	sqlQuery, err := generateAIText(ctx, provider, "You are a PostgreSQL expert. Return only one safe SELECT query.", sqlPrompt)
 	if err != nil {
-		log.Printf("   ❌ [SQL GEN] Gemini API error: %v", err)
+		log.Printf("   ❌ [SQL GEN] AI provider error: %v", err)
 		return "", fmt.Errorf("failed to generate SQL: %w", err)
 	}
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		log.Printf("   ❌ [SQL GEN] No response from Gemini AI")
-		return "", fmt.Errorf("no SQL generated")
-	}
-
-	sqlQuery := strings.TrimSpace(fmt.Sprint(resp.Candidates[0].Content.Parts[0]))
+	sqlQuery = strings.TrimSpace(sqlQuery)
 	log.Printf("   📋 [SQL GEN] Raw AI response: %s", sqlQuery)
 
 	// Clean up the SQL (remove markdown code blocks if present)
@@ -277,20 +260,8 @@ func executeSafeQuery(query string) ([]map[string]interface{}, error) {
 	return results, nil
 }
 
-// formatResultsWithAI uses Gemini to create a human-readable response
-func formatResultsWithAI(originalPrompt string, queryResults []map[string]interface{}) (string, error) {
-	log.Printf("   🔍 [FORMAT] Creating AI client for formatting...")
-	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
-	if err != nil {
-		log.Printf("   ❌ [FORMAT] Failed to create AI client: %v", err)
-		return "", fmt.Errorf("failed to create AI client: %w", err)
-	}
-	defer client.Close()
-	log.Printf("   ✅ [FORMAT] AI client created")
-
-	model := client.GenerativeModel("gemini-2.5-flash-lite")
-
+// formatResultsWithAI uses the configured AI provider to create a HTML response.
+func formatResultsWithAI(originalPrompt string, queryResults []map[string]interface{}, provider aiProvider) (string, error) {
 	// Convert results to JSON string
 	resultsJSON, _ := json.Marshal(queryResults)
 	log.Printf("   📋 [FORMAT] Data size: %d bytes, %d rows", len(resultsJSON), len(queryResults))
@@ -301,24 +272,19 @@ User asked: "%s"
 Query returned this data:
 %s
 
-Provide a clear, concise, human-readable summary of these results that directly answers the user's question.
-Format the response in a friendly, professional manner. Include key insights and numbers.
-If the data is empty, explain that no data was found for the request.
+Return a single HTML fragment only. Use semantic HTML tags and inline CSS styles.
+No markdown, no code fences, and no surrounding explanation.
+The HTML should summarize the answer clearly with headings, short paragraphs, bullets, tables, or cards if useful.
+If the data is empty, return a short HTML fragment explaining that no data was found.
 `, originalPrompt, string(resultsJSON))
-
-	log.Printf("   🔍 [FORMAT] Sending to Gemini for formatting...")
-	resp, err := model.GenerateContent(ctx, genai.Text(analysisPrompt))
+	log.Printf("   🔍 [FORMAT] Sending to AI provider for formatting...")
+	resp, err := generateAIText(context.Background(), provider, "You are a retail business analyst that returns only HTML fragments.", analysisPrompt)
 	if err != nil {
-		log.Printf("   ❌ [FORMAT] Gemini API error: %v", err)
+		log.Printf("   ❌ [FORMAT] AI provider error: %v", err)
 		return "", fmt.Errorf("failed to generate analysis: %w", err)
 	}
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		log.Printf("   ⚠️  [FORMAT] No response from Gemini")
-		return "No analysis generated", nil
-	}
-
-	analysis := strings.TrimSpace(fmt.Sprint(resp.Candidates[0].Content.Parts[0]))
+	analysis := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(resp, "```"), "```html"))
 	log.Printf("   ✅ [FORMAT] Analysis generated successfully (%d chars)", len(analysis))
 	return analysis, nil
 }

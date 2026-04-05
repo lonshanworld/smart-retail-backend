@@ -8,13 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // HandleGetSalesReport generates a sales report based on filters.
@@ -161,6 +158,7 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 
 	shopID := c.Query("shopId")
 	itemID := c.Query("itemId")
+	provider := resolveAIProvider(c.Query("provider"))
 
 	if shopID == "" || itemID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "shopId and itemId are required"})
@@ -200,42 +198,15 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	// 3. Construct the prompt for the Gemini API
 	prompt := constructForecastPrompt(productName, shopName, currentStock, historicalData)
 
-	// 4. Call the Gemini API
-	client, err := genai.NewClient(ctx, option.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
+	// 4. Call the configured AI provider
+	resp, err := generateAIText(ctx, provider, "You are an expert retail data analyst. Return only valid minified JSON.", prompt)
 	if err != nil {
-		log.Printf("Error creating Gemini client: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to connect to AI service"})
-	}
-	defer client.Close()
-
-	model := client.GenerativeModel("gemini-2.5-flash-lite")
-	model.SafetySettings = []*genai.SafetySetting{
-		{
-			Category:  genai.HarmCategoryDangerousContent,
-			Threshold: genai.HarmBlockNone,
-		},
-		{
-			Category:  genai.HarmCategoryHarassment,
-			Threshold: genai.HarmBlockNone,
-		},
-		{
-			Category:  genai.HarmCategorySexuallyExplicit,
-			Threshold: genai.HarmBlockNone,
-		},
-		{
-			Category:  genai.HarmCategoryHateSpeech,
-			Threshold: genai.HarmBlockNone,
-		},
-	}
-
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-	if err != nil {
-		log.Printf("Error from Gemini API: %v", err)
+		log.Printf("Error from AI provider: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to generate forecast from AI"})
 	}
 
 	// 5. Parse the response and format for the frontend
-	forecastResponse, err := parseGeminiResponse(resp, productName, shopName, currentStock)
+	forecastResponse, err := parseForecastResponse(resp, productName, shopName, currentStock)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
@@ -253,7 +224,7 @@ func constructForecastPrompt(productName, shopName string, currentStock int, dat
 		dataStr = "No sales data available for the last 90 days."
 	}
 
-	jsonFormat := `{"forecast":[{"date":"YYYY-MM-DD","predicted_sales":integer},...],"summary":"string","positive_factors":["string",...],"negative_factors":["string",...]}`
+	jsonFormat := `{"forecast":[{"date":"YYYY-MM-DD","predicted_sales":integer},...],"summary":"string","analysis_html":"<div>...</div>","positive_factors":["string",...],"negative_factors":["string",...]}`
 
 	return fmt.Sprintf(`
         You are an expert retail data analyst. Your task is to generate a 7-day sales forecast and provide a brief analysis based on the data provided.
@@ -283,39 +254,29 @@ func extractJSON(rawString string) string {
 	return rawString[start : end+1]
 }
 
-// parseGeminiResponse parses the JSON from Gemini into a structured response.
-func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopName string, currentStock int) (*models.SalesForecastResponse, error) {
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("no content received from AI")
-	}
-
-	var geminiText string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if txt, ok := part.(genai.Text); ok {
-			geminiText += string(txt)
-		}
-	}
-
-	if geminiText == "" {
+// parseForecastResponse parses the JSON from an AI provider into a structured response.
+func parseForecastResponse(rawText, productName, shopName string, currentStock int) (*models.SalesForecastResponse, error) {
+	if rawText == "" {
 		return nil, fmt.Errorf("no text content received from AI")
 	}
 
 	// Clean the response to get only the JSON object
-	jsonStr := extractJSON(geminiText)
+	jsonStr := extractJSON(rawText)
 	if jsonStr == "" {
-		log.Printf("Could not extract JSON from Gemini response: %s", geminiText)
+		log.Printf("Could not extract JSON from AI response: %s", rawText)
 		return nil, fmt.Errorf("failed to parse AI response format")
 	}
 
 	var geminiJSON struct {
 		Forecast        []models.DailyForecast `json:"forecast"`
 		Summary         string                 `json:"summary"`
+		AnalysisHTML    string                 `json:"analysis_html"`
 		PositiveFactors []string               `json:"positive_factors"`
 		NegativeFactors []string               `json:"negative_factors"`
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &geminiJSON); err != nil {
-		log.Printf("Error parsing Gemini JSON: %v\nRaw JSON: %s", err, jsonStr)
+		log.Printf("Error parsing AI JSON: %v\nRaw JSON: %s", err, jsonStr)
 		return nil, fmt.Errorf("failed to parse AI forecast data")
 	}
 
@@ -332,6 +293,7 @@ func parseGeminiResponse(resp *genai.GenerateContentResponse, productName, shopN
 		DailyForecast: geminiJSON.Forecast,
 		AiAnalysis: models.AiAnalysis{
 			Summary:         geminiJSON.Summary,
+			AnalysisHTML:    geminiJSON.AnalysisHTML,
 			PositiveFactors: geminiJSON.PositiveFactors,
 			NegativeFactors: geminiJSON.NegativeFactors,
 		},

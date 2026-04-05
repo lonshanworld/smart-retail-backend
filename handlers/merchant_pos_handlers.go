@@ -225,7 +225,7 @@ func HandleSearchProductsForPOS(c *fiber.Ctx) error {
 		argPos++
 	}
 
-	finalQuery := baseQuery + "\n        ORDER BY i.name ASC\n        LIMIT 50\n    "
+	finalQuery := baseQuery + "\n        ORDER BY i.created_at DESC, i.id DESC\n        LIMIT 50\n    "
 
 	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {

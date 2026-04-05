@@ -94,6 +94,22 @@ func fetchInventoryItemWithNested(ctx context.Context, db interface {
 }
 
 func adjustShopStock(ctx context.Context, tx pgx.Tx, shopID, itemID, userID, clientOperationID, movementType, reason string, quantityChange int) (int, bool, error) {
+	normalizedMovementType := movementType
+	switch movementType {
+	case "stock_in", "sale", "return", "adjustment":
+		// already canonical
+	case "return_to_supplier":
+		normalizedMovementType = "return"
+	case "inventory_correction", "damaged_goods", "expired_goods", "theft_loss", "correction_add", "correction_remove", "found_item", "spoilage", "damage", "theft", "other_add", "other_remove":
+		normalizedMovementType = "adjustment"
+	default:
+		if quantityChange < 0 {
+			normalizedMovementType = "adjustment"
+		} else if normalizedMovementType == "" {
+			normalizedMovementType = "stock_in"
+		}
+	}
+
 	var currentQuantity int
 	if err := tx.QueryRow(ctx, `SELECT quantity FROM shop_stock WHERE shop_id = $1 AND inventory_item_id = $2 FOR UPDATE`, shopID, itemID).Scan(&currentQuantity); err != nil {
 		if err == pgx.ErrNoRows {
@@ -126,7 +142,7 @@ func adjustShopStock(ctx context.Context, tx pgx.Tx, shopID, itemID, userID, cli
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO stock_movements (shop_id, inventory_item_id, user_id, movement_type, quantity_changed, new_quantity, reason, movement_date)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, shopID, itemID, userID, movementType, quantityChange, newQuantity, reason, time.Now()); err != nil {
+	`, shopID, itemID, userID, normalizedMovementType, quantityChange, newQuantity, reason, time.Now()); err != nil {
 		return 0, false, err
 	}
 

@@ -5,6 +5,7 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
+	"database/sql"
 	"log"
 	"strconv"
 
@@ -33,10 +34,17 @@ func HandleGetCombinedStocks(c *fiber.Ctx) error {
 	// Base query
 	query := `
 		SELECT
-			i.id, i.name, i.sku, ss.quantity, i.selling_price, i.original_price, s.name as shop_name, s.id as shop_id
+			i.id, i.name, i.sku, ss.quantity, i.selling_price, i.original_price, s.name as shop_name, s.id as shop_id,
+			i.category_id, i.subcategory_id, i.brand_id,
+			c.id, c.name, c.description,
+			sc.id, sc.name, sc.description,
+			b.id, b.name, b.description
 		FROM inventory_items i
 		JOIN shop_stock ss ON i.id = ss.inventory_item_id
 		JOIN shops s ON ss.shop_id = s.id
+		LEFT JOIN categories c ON i.category_id = c.id
+		LEFT JOIN subcategories sc ON i.subcategory_id = sc.id
+		LEFT JOIN brands b ON i.brand_id = b.id
 		WHERE i.merchant_id = $1
 	`
 	countQuery := `SELECT COUNT(*) FROM inventory_items i JOIN shop_stock ss ON i.id = ss.inventory_item_id JOIN shops s ON ss.shop_id = s.id WHERE i.merchant_id = $1`
@@ -76,9 +84,36 @@ func HandleGetCombinedStocks(c *fiber.Ctx) error {
 	items := make([]models.CombinedStockItem, 0)
 	for rows.Next() {
 		var item models.CombinedStockItem
-		if err := rows.Scan(&item.ID, &item.Name, &item.SKU, &item.Quantity, &item.SellingPrice, &item.OriginalPrice, &item.ShopName, &item.ShopID); err != nil {
+		var categoryID, categoryName, categoryDescription sql.NullString
+		var subcategoryID, subcategoryName, subcategoryDescription sql.NullString
+		var brandID, brandName, brandDescription sql.NullString
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.SKU, &item.Quantity, &item.SellingPrice, &item.OriginalPrice, &item.ShopName, &item.ShopID,
+			&item.CategoryID, &item.SubcategoryID, &item.BrandID,
+			&categoryID, &categoryName, &categoryDescription,
+			&subcategoryID, &subcategoryName, &subcategoryDescription,
+			&brandID, &brandName, &brandDescription,
+		); err != nil {
 			log.Printf("Error scanning combined stock item: %v", err)
 			continue
+		}
+		if categoryID.Valid {
+			item.CategoryObj = &models.Category{ID: categoryID.String, Name: categoryName.String}
+			if categoryDescription.Valid {
+				item.CategoryObj.Description = &categoryDescription.String
+			}
+		}
+		if subcategoryID.Valid {
+			item.SubcategoryObj = &models.Subcategory{ID: subcategoryID.String, Name: subcategoryName.String}
+			if subcategoryDescription.Valid {
+				item.SubcategoryObj.Description = &subcategoryDescription.String
+			}
+		}
+		if brandID.Valid {
+			item.BrandObj = &models.Brand{ID: brandID.String, Name: brandName.String}
+			if brandDescription.Valid {
+				item.BrandObj.Description = &brandDescription.String
+			}
 		}
 		items = append(items, item)
 	}

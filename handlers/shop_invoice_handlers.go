@@ -70,12 +70,13 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 
 	query := `
-		 SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+		 SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
 			 total_amount, payment_status, notes, created_at, updated_at
-        FROM invoices
-        WHERE shop_id = $1
-        ORDER BY invoice_date DESC
+        FROM invoices i
+		 JOIN shops s ON s.id = i.shop_id
+		WHERE i.shop_id = $1
+		ORDER BY i.invoice_date DESC
         LIMIT $2 OFFSET $3
     `
 
@@ -91,7 +92,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 		var inv models.Invoice
 		if err := rows.Scan(
 			&inv.ID, &inv.SaleID, &inv.InvoiceNumber, &inv.MerchantID,
-			&inv.ShopID, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
+			&inv.ShopID, &inv.ShopName, &inv.CheckoutTime, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
 			&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount, &inv.DeliveryCharge,
 			&inv.TotalAmount, &inv.PaymentStatus, &inv.Notes,
 			&inv.CreatedAt, &inv.UpdatedAt,
@@ -178,15 +179,16 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 	// get invoice's shop_id and merchant_id
 	var inv models.Invoice
 	query := `
-		 SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
+		 SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
 			 total_amount, payment_status, notes, created_at, updated_at
-        FROM invoices
-        WHERE id = $1
+        FROM invoices i
+		 JOIN shops s ON s.id = i.shop_id
+		WHERE i.id = $1
     `
 	if err := db.QueryRow(ctx, query, invoiceId).Scan(
 		&inv.ID, &inv.SaleID, &inv.InvoiceNumber, &inv.MerchantID,
-		&inv.ShopID, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
+		&inv.ShopID, &inv.ShopName, &inv.CheckoutTime, &inv.CustomerID, &inv.InvoiceDate, &inv.DueDate,
 		&inv.Subtotal, &inv.DiscountAmount, &inv.TaxAmount,
 		&inv.TotalAmount, &inv.PaymentStatus, &inv.Notes,
 		&inv.CreatedAt, &inv.UpdatedAt,
@@ -238,7 +240,8 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 	// Authorization similar to list handler
 	role := claims.Role
 	userId := claims.UserID
-	if role == "merchant" {
+	switch role {
+	case "merchant":
 		var ownerId string
 		if err := db.QueryRow(ctx, "SELECT merchant_id FROM shops WHERE id = $1", inv.ShopID).Scan(&ownerId); err != nil {
 			log.Printf("Error checking shop owner: %v", err)
@@ -247,7 +250,7 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 		if ownerId != userId {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Merchant not authorized for this shop"})
 		}
-	} else if role == "staff" {
+	case "staff":
 		var assignedShopID *string
 		if err := db.QueryRow(ctx, "SELECT assigned_shop_id FROM users WHERE id = $1", userId).Scan(&assignedShopID); err != nil {
 			log.Printf("Error checking staff assigned shop: %v", err)
@@ -256,7 +259,7 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 		if assignedShopID == nil || *assignedShopID != inv.ShopID {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Staff not authorized for this shop"})
 		}
-	} else {
+	default:
 		if role != "admin" {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Access denied"})
 		}

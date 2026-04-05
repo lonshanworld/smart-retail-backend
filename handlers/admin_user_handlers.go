@@ -29,6 +29,8 @@ func HandleListUsers(c *fiber.Ctx) error {
 		args = append(args, roleFilter)
 	}
 
+	query += " ORDER BY created_at DESC"
+
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error querying users: %v", err)
