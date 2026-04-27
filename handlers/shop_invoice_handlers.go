@@ -71,8 +71,8 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 
 	query := `
 		 SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
-			 total_amount, payment_status, notes, created_at, updated_at
+			 i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+			 i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
         FROM invoices i
 		 JOIN shops s ON s.id = i.shop_id
 		WHERE i.shop_id = $1
@@ -180,8 +180,8 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 	var inv models.Invoice
 	query := `
 		 SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-			 invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
-			 total_amount, payment_status, notes, created_at, updated_at
+			 i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+			 i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
         FROM invoices i
 		 JOIN shops s ON s.id = i.shop_id
 		WHERE i.id = $1

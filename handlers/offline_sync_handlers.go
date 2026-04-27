@@ -290,15 +290,15 @@ func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offl
 	for _, item := range offlineSale.Items {
 		itemID := generateUUID()
 		createItemQuery := `
-			INSERT INTO sale_items (id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, subtotal, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO sale_items (id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`
 
 		subtotal := float64(item.Quantity) * item.SellingPriceAtSale
 
 		if _, err := tx.Exec(ctx, createItemQuery,
 			itemID, saleID, item.ProductID, item.Quantity,
-			item.SellingPriceAtSale, subtotal, now, now,
+			item.SellingPriceAtSale, item.OriginalPriceAtSale, subtotal, now, now,
 		); err != nil {
 			errMsg := fmt.Sprintf("Failed to create sale item: %v", err)
 			result.Error = &errMsg

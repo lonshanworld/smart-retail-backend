@@ -5,6 +5,7 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -68,6 +69,16 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid endDate format"})
 	}
 
+	usePagination := c.Query("page") != "" || c.Query("pageSize") != ""
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+
 	// Query to get actual sale records (not aggregated)
 	query := `
         SELECT id, shop_id, merchant_id, sale_date, total_amount, 
@@ -85,6 +96,10 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 	}
 
 	query += " ORDER BY sale_date DESC"
+	if usePagination {
+		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		args = append(args, pageSize, (page-1)*pageSize)
+	}
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
@@ -121,13 +136,28 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 			items := make([]models.SaleItem, 0)
 			for itemRows.Next() {
 				var item models.SaleItem
+				var itemName sql.NullString
+				var itemSKU sql.NullString
+				var originalPrice sql.NullFloat64
 				if err := itemRows.Scan(
-					&item.ID, &item.SaleID, &item.InventoryItemID, &item.ItemName,
-					&item.ItemSKU, &item.QuantitySold, &item.SellingPriceAtSale,
-					&item.OriginalPriceAtSale, &item.Subtotal, &item.CreatedAt, &item.UpdatedAt,
+					&item.ID, &item.SaleID, &item.InventoryItemID, &itemName,
+					&itemSKU, &item.QuantitySold, &item.SellingPriceAtSale,
+					&originalPrice, &item.Subtotal, &item.CreatedAt, &item.UpdatedAt,
 				); err != nil {
 					log.Printf("⚠️  [SALES REPORT] Failed to scan item: %v", err)
 					continue
+				}
+				if itemName.Valid {
+					value := itemName.String
+					item.ItemName = &value
+				}
+				if itemSKU.Valid {
+					value := itemSKU.String
+					item.ItemSKU = &value
+				}
+				if originalPrice.Valid {
+					value := originalPrice.Float64
+					item.OriginalPriceAtSale = &value
 				}
 				items = append(items, item)
 			}
@@ -136,6 +166,38 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 		}
 
 		sales = append(sales, sale)
+	}
+
+	if usePagination {
+		countQuery := `
+			SELECT COUNT(*)
+			FROM sales
+			WHERE merchant_id = $1 AND sale_date BETWEEN $2 AND $3
+		`
+		countArgs := []interface{}{merchantID, startDate, endDate}
+		if shopID != "" {
+			countQuery += " AND shop_id = $4"
+			countArgs = append(countArgs, shopID)
+		}
+
+		var totalItems int
+		if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalItems); err != nil {
+			log.Printf("❌ [SALES REPORT] Count query error: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count sales report data"})
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"items": sales,
+				"meta": fiber.Map{
+					"totalItems":  totalItems,
+					"currentPage": page,
+					"pageSize":    pageSize,
+					"totalPages":  (totalItems + pageSize - 1) / pageSize,
+				},
+			},
+		})
 	}
 
 	log.Printf("✅ [SALES REPORT] Returning %d sales", len(sales))

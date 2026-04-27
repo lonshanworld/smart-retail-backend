@@ -139,7 +139,7 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 
 	for key, value := range updates {
 		switch key {
-		case "name", "merchant_id", "address", "phone", "is_active", "is_primary":
+		case "name", "merchant_id", "address", "phone", "tax_rate", "taxRate", "is_active", "is_primary":
 			setParts = append(setParts, fmt.Sprintf("%s = $%d", key, argId))
 			args = append(args, value)
 			argId++
@@ -152,14 +152,14 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "No updatable fields provided"})
 	}
 
-	query := fmt.Sprintf("UPDATE shops SET %s, updated_at = NOW() WHERE id = $%d RETURNING id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at", strings.Join(setParts, ", "), argId)
+	query := fmt.Sprintf("UPDATE shops SET %s, updated_at = NOW() WHERE id = $%d RETURNING id, name, merchant_id, address, phone, tax_rate, is_active, is_primary, created_at, updated_at", strings.Join(setParts, ", "), argId)
 	args = append(args, shopID)
 
 	var updatedShop models.Shop
 	var address, phone sql.NullString
 
 	err := db.QueryRow(ctx, query, args...).Scan(
-		&updatedShop.ID, &updatedShop.Name, &updatedShop.MerchantID, &address, &phone, &updatedShop.IsActive, &updatedShop.IsPrimary, &updatedShop.CreatedAt, &updatedShop.UpdatedAt,
+		&updatedShop.ID, &updatedShop.Name, &updatedShop.MerchantID, &address, &phone, &updatedShop.TaxRate, &updatedShop.IsActive, &updatedShop.IsPrimary, &updatedShop.CreatedAt, &updatedShop.UpdatedAt,
 	)
 
 	if err != nil {
@@ -213,16 +213,20 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 	query := `
-        INSERT INTO shops (name, merchant_id, address, phone, is_active, is_primary)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at
-    `
+		INSERT INTO shops (name, merchant_id, address, phone, tax_rate, is_active, is_primary)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, name, merchant_id, address, phone, tax_rate, is_active, is_primary, created_at, updated_at
+	`
 
 	var newShop models.Shop
 	var address, phone sql.NullString
 
-	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, addressVal, phoneVal, req.IsActive, req.IsPrimary).Scan(
-		&newShop.ID, &newShop.Name, &newShop.MerchantID, &address, &phone, &newShop.IsActive, &newShop.IsPrimary, &newShop.CreatedAt, &newShop.UpdatedAt,
+	taxRate := 5.0
+	if req.TaxRate != nil {
+		taxRate = *req.TaxRate
+	}
+	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, addressVal, phoneVal, taxRate, req.IsActive, req.IsPrimary).Scan(
+		&newShop.ID, &newShop.Name, &newShop.MerchantID, &address, &phone, &newShop.TaxRate, &newShop.IsActive, &newShop.IsPrimary, &newShop.CreatedAt, &newShop.UpdatedAt,
 	)
 
 	if err != nil {
@@ -247,12 +251,12 @@ func HandleGetShopByID(c *fiber.Ctx) error {
 	ctx := context.Background()
 	shopID := c.Params("shopId")
 
-	query := "SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at FROM shops WHERE id = $1"
+	query := "SELECT id, name, merchant_id, address, phone, tax_rate, is_active, is_primary, created_at, updated_at FROM shops WHERE id = $1"
 	row := db.QueryRow(ctx, query, shopID)
 
 	var s models.Shop
 	var address, phone sql.NullString
-	if err := row.Scan(&s.ID, &s.Name, &s.MerchantID, &address, &phone, &s.IsActive, &s.IsPrimary, &s.CreatedAt, &s.UpdatedAt); err != nil {
+	if err := row.Scan(&s.ID, &s.Name, &s.MerchantID, &address, &phone, &s.TaxRate, &s.IsActive, &s.IsPrimary, &s.CreatedAt, &s.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 		}
@@ -322,7 +326,7 @@ func HandleListShops(c *fiber.Ctx) error {
 	}
 
 	// --- Get Paginated Data ---
-	query := "SELECT id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at " + baseQuery + whereClause + fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argId, argId+1)
+	query := "SELECT id, name, merchant_id, address, phone, tax_rate, is_active, is_primary, created_at, updated_at " + baseQuery + whereClause + fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argId, argId+1)
 	args = append(args, pageSize, offset)
 
 	rows, err := db.Query(ctx, query, args...)
@@ -336,7 +340,7 @@ func HandleListShops(c *fiber.Ctx) error {
 	for rows.Next() {
 		var s models.Shop
 		var address, phone sql.NullString
-		if err := rows.Scan(&s.ID, &s.Name, &s.MerchantID, &address, &phone, &s.IsActive, &s.IsPrimary, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.MerchantID, &address, &phone, &s.TaxRate, &s.IsActive, &s.IsPrimary, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			log.Printf("Error scanning shop row: %v", err)
 			continue
 		}

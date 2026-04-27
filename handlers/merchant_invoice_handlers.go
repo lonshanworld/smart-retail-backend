@@ -35,8 +35,8 @@ func HandleListInvoices(c *fiber.Ctx) error {
 	if shopID != "" {
 		query = `
 			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-				   invoice_date, due_date, subtotal, discount_amount, tax_amount, delivery_charge,
-				   total_amount, payment_status, notes, created_at, updated_at
+				   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+				   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
 			FROM invoices i
 			JOIN shops s ON s.id = i.shop_id
 			WHERE i.merchant_id = $1 AND i.shop_id = $2
@@ -47,8 +47,8 @@ func HandleListInvoices(c *fiber.Ctx) error {
 	} else {
 		query = `
 			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-				   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
-				   total_amount, payment_status, notes, created_at, updated_at
+				   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+				   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
 			FROM invoices i
 			JOIN shops s ON s.id = i.shop_id
 			WHERE i.merchant_id = $1
@@ -163,8 +163,8 @@ func HandleGetInvoiceByID(c *fiber.Ctx) error {
 
 	query := `
 		SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-			   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
-			   total_amount, payment_status, notes, created_at, updated_at
+			   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+			   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
 		FROM invoices i
 		JOIN shops s ON s.id = i.shop_id
 		WHERE i.id = $1 AND i.merchant_id = $2
@@ -175,7 +175,7 @@ func HandleGetInvoiceByID(c *fiber.Ctx) error {
 		&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
 		&invoice.ShopID, &invoice.ShopName, &invoice.CheckoutTime, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
 		&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount,
-		&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
+		&invoice.DeliveryCharge, &invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 		&invoice.CreatedAt, &invoice.UpdatedAt,
 	); err != nil {
 		log.Printf("Error getting invoice by ID: %v", err)
@@ -235,8 +235,8 @@ func HandleGetInvoiceBySaleID(c *fiber.Ctx) error {
 
 	query := `
 		SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-			   invoice_date, due_date, subtotal, discount_amount, tax_amount, 
-			   total_amount, payment_status, notes, created_at, updated_at
+			   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+			   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
 		FROM invoices i
 		JOIN shops s ON s.id = i.shop_id
 		WHERE sale_id = $1 AND merchant_id = $2
@@ -247,7 +247,7 @@ func HandleGetInvoiceBySaleID(c *fiber.Ctx) error {
 		&invoice.ID, &invoice.SaleID, &invoice.InvoiceNumber, &invoice.MerchantID,
 		&invoice.ShopID, &invoice.ShopName, &invoice.CheckoutTime, &invoice.CustomerID, &invoice.InvoiceDate, &invoice.DueDate,
 		&invoice.Subtotal, &invoice.DiscountAmount, &invoice.TaxAmount,
-		&invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
+		&invoice.DeliveryCharge, &invoice.TotalAmount, &invoice.PaymentStatus, &invoice.Notes,
 		&invoice.CreatedAt, &invoice.UpdatedAt,
 	); err != nil {
 		log.Printf("Error getting invoice by sale ID: %v", err)

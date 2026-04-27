@@ -14,6 +14,10 @@ func EnsureSyncSchema(ctx context.Context) error {
 
 	statements := []string{
 		`ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_sale_id TEXT`,
+		`ALTER TABLE sales ADD COLUMN IF NOT EXISTS delivery_charge NUMERIC(10, 2) DEFAULT 0.00`,
+		`ALTER TABLE sales ALTER COLUMN delivery_charge SET DEFAULT 0.00`,
+		`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS delivery_charge NUMERIC(10, 2) DEFAULT 0.00`,
+		`ALTER TABLE invoices ALTER COLUMN delivery_charge SET DEFAULT 0.00`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales (client_sale_id)`,
 		`CREATE TABLE IF NOT EXISTS inventory_operations (
 			id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

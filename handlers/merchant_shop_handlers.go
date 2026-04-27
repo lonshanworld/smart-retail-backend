@@ -22,7 +22,7 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	merchantID := claims.UserID
 
 	query := `
-		SELECT s.id, s.name, s.address, s.phone, s.is_active, s.is_primary,
+		SELECT s.id, s.name, s.address, s.phone, s.tax_rate, s.is_active, s.is_primary,
 			   COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
 		FROM shops s
 		LEFT JOIN payment_settings ps ON ps.shop_id = s.id
@@ -37,7 +37,7 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	shops := make([]models.Shop, 0)
 	for rows.Next() {
 		var shop models.Shop
-		if err := rows.Scan(&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.DeliveryCharge, &shop.CreatedAt, &shop.UpdatedAt); err != nil {
+		if err := rows.Scan(&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.TaxRate, &shop.IsActive, &shop.IsPrimary, &shop.DeliveryCharge, &shop.CreatedAt, &shop.UpdatedAt); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to scan shop data"})
 		}
 		shop.MerchantID = merchantID
@@ -88,14 +88,14 @@ func HandleUpdateMerchantShop(c *fiber.Ctx) error {
 
 	query := `
 		UPDATE shops
-		SET name = $1, address = $2, phone = $3
-		WHERE id = $4 AND merchant_id = $5
-		RETURNING id, name, address, phone, is_active, is_primary, created_at, updated_at
+		SET name = $1, address = $2, phone = $3, tax_rate = $4
+		WHERE id = $5 AND merchant_id = $6
+		RETURNING id, name, address, phone, tax_rate, is_active, is_primary, created_at, updated_at
 	`
 
 	var shop models.Shop
-	err = tx.QueryRow(ctx, query, req.Name, req.Address, req.Phone, shopID, merchantID).Scan(
-		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+	err = tx.QueryRow(ctx, query, req.Name, req.Address, req.Phone, req.TaxRate, shopID, merchantID).Scan(
+		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.TaxRate, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
 	)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update shop"})
@@ -286,11 +286,11 @@ func HandleSetPrimaryShop(c *fiber.Ctx) error {
         UPDATE shops 
         SET is_primary = TRUE 
         WHERE id = $1 AND merchant_id = $2
-        RETURNING id, name, address, phone, is_active, is_primary, created_at, updated_at
+		RETURNING id, name, address, phone, tax_rate, is_active, is_primary, created_at, updated_at
     `
 	var shop models.Shop
 	err = tx.QueryRow(ctx, setQuery, shopID, merchantID).Scan(
-		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
+		&shop.ID, &shop.Name, &shop.Address, &shop.Phone, &shop.TaxRate, &shop.IsActive, &shop.IsPrimary, &shop.CreatedAt, &shop.UpdatedAt,
 	)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to set primary shop"})
