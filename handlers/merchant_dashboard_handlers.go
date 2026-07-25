@@ -6,6 +6,7 @@ import (
 	"app/models"
 	"context"
 	"log"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -77,13 +78,14 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 	// 4. Top Selling Products
 	queryTopProducts := `
 		SELECT
-			i.id AS product_id,
-			i.name AS product_name,
+			COALESCE(i.id, p.id) AS product_id,
+			COALESCE(i.name, p.name) AS product_name,
 			COALESCE(SUM(si.quantity_sold), 0) AS quantity_sold,
 			COALESCE(SUM(si.subtotal), 0) AS revenue
 		FROM sales s
 		JOIN sale_items si ON s.id = si.sale_id
-		JOIN inventory_items i ON si.inventory_item_id = i.id
+		LEFT JOIN stock_items i ON si.stock_item_id = i.id
+		LEFT JOIN products p ON si.product_id = p.id
 		WHERE s.merchant_id = $1
 	`
 	argsTopProducts := []interface{}{merchantID}
@@ -91,11 +93,25 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 		queryTopProducts += " AND s.shop_id = $2"
 		argsTopProducts = append(argsTopProducts, shopID)
 	}
+	topPage, _ := strconv.Atoi(c.Query("topProductsPage", "1"))
+	topPageSize, _ := strconv.Atoi(c.Query("topProductsPageSize", "5"))
+	if topPage < 1 {
+		topPage = 1
+	}
+	if topPageSize < 1 || topPageSize > 100 {
+		topPageSize = 5
+	}
+	groupedTopProducts := queryTopProducts + ` GROUP BY COALESCE(i.id, p.id), COALESCE(i.name, p.name)`
+	var topTotal int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM ("+groupedTopProducts+") top_products", argsTopProducts...).Scan(&topTotal); err != nil {
+		log.Printf("Error counting top selling products: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count top selling products"})
+	}
 	queryTopProducts += `
-		GROUP BY i.id, i.name
+		GROUP BY COALESCE(i.id, p.id), COALESCE(i.name, p.name)
 		ORDER BY revenue DESC
-		LIMIT 5
-	`
+		LIMIT $` + strconv.Itoa(len(argsTopProducts)+1) + ` OFFSET $` + strconv.Itoa(len(argsTopProducts)+2)
+	argsTopProducts = append(argsTopProducts, topPageSize, (topPage-1)*topPageSize)
 
 	rows, err := db.Query(ctx, queryTopProducts, argsTopProducts...)
 	if err != nil {
@@ -114,6 +130,7 @@ func HandleGetMerchantDashboardSummary(c *fiber.Ctx) error {
 		products = append(products, p)
 	}
 	summary.TopSellingProducts = products
+	summary.TopSellingProductsPagination = models.Pagination{TotalItems: topTotal, TotalPages: (topTotal + topPageSize - 1) / topPageSize, CurrentPage: topPage, PageSize: topPageSize}
 
 	log.Printf("[MerchantDashboard] Returning summary - Revenue: %.2f, Transactions: %.0f, Products: %d",
 		summary.TotalSalesRevenue.Value, summary.NumberOfTransactions.Value, len(summary.TopSellingProducts))

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleListMerchantSuppliers handles the request to list merchant suppliers with pagination.
@@ -29,6 +30,12 @@ func HandleListMerchantSuppliers(c *fiber.Ctx) error {
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	nameQuery := c.Query("name")
 
 	// Base query
@@ -40,6 +47,7 @@ func HandleListMerchantSuppliers(c *fiber.Ctx) error {
 	if nameQuery != "" {
 		baseQuery += fmt.Sprintf(" AND name ILIKE $%d", argCount)
 		args = append(args, "%"+nameQuery+"%")
+		argCount++
 	}
 
 	// Count total items
@@ -117,7 +125,7 @@ func HandleGetSupplierDetails(c *fiber.Ctx) error {
 		&s.ID, &s.MerchantID, &s.Name, &contactName, &contactEmail, &contactPhone, &address, &notes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Supplier not found"})
 		}
 		log.Printf("Error fetching supplier details: %v", err)
@@ -226,11 +234,24 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 	argCount := 1
 
 	for key, value := range updates {
-		if key != "id" && key != "merchant_id" {
-			setParts = append(setParts, fmt.Sprintf("%s = $%d", key, argCount))
-			args = append(args, value)
-			argCount++
+		column := ""
+		switch key {
+		case "name", "contact_name", "contact_email", "contact_phone", "address", "notes":
+			column = key
+		case "contactName":
+			column = "contact_name"
+		case "contactEmail":
+			column = "contact_email"
+		case "contactPhone":
+			column = "contact_phone"
+		case "clientOperationId", "client_operation_id", "id", "merchant_id":
+			continue
+		default:
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Unsupported supplier field"})
 		}
+		setParts = append(setParts, fmt.Sprintf("%s = $%d", column, argCount))
+		args = append(args, value)
+		argCount++
 	}
 
 	if len(setParts) == 0 {
@@ -250,7 +271,7 @@ func HandleUpdateExistingSupplier(c *fiber.Ctx) error {
 		&s.ID, &s.MerchantID, &s.Name, &contactName, &contactEmail, &contactPhone, &address, &notes, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Supplier not found or you do not have permission to update it"})
 		}
 		log.Printf("Error updating supplier: %v", err)
@@ -328,10 +349,27 @@ func HandleGetSuppliersForSelection(c *fiber.Ctx) error {
 		return err
 	}
 	merchantId := claims.UserID
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 50)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 50
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	pattern := ""
+	if search != "" {
+		pattern = "%" + search + "%"
+	}
+	var total int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM suppliers WHERE merchant_id=$1 AND ($2='' OR name ILIKE $2)`, merchantId, pattern).Scan(&total); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Database error"})
+	}
 
-	query := "SELECT id, name FROM suppliers WHERE merchant_id = $1 ORDER BY created_at DESC, id DESC"
+	query := "SELECT id, name FROM suppliers WHERE merchant_id = $1 AND ($2='' OR name ILIKE $2) ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4"
 
-	rows, err := db.Query(ctx, query, merchantId)
+	rows, err := db.Query(ctx, query, merchantId, pattern, pageSize, (page-1)*pageSize)
 	if err != nil {
 		log.Printf("Error fetching suppliers for selection: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Database error"})
@@ -348,5 +386,5 @@ func HandleGetSuppliersForSelection(c *fiber.Ctx) error {
 		selectionItems = append(selectionItems, item)
 	}
 
-	return c.JSON(fiber.Map{"data": selectionItems})
+	return c.JSON(fiber.Map{"data": selectionItems, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }

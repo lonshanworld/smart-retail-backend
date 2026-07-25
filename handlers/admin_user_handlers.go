@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -21,15 +23,33 @@ func HandleListUsers(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	roleFilter := c.Query("role")
-
-	query := "SELECT id, name, email, role, is_active, created_at, updated_at FROM users"
-	var args []interface{}
-	if roleFilter != "" {
-		query += " WHERE role = $1"
-		args = append(args, roleFilter)
+	search := strings.TrimSpace(c.Query("search"))
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	pageSize, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
 	}
 
-	query += " ORDER BY created_at DESC"
+	where := " WHERE 1=1"
+	var args []interface{}
+	if roleFilter != "" {
+		where += " AND role = $1"
+		args = append(args, roleFilter)
+	}
+	if search != "" {
+		where += fmt.Sprintf(" AND (name ILIKE $%d OR email ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count users"})
+	}
+
+	query := fmt.Sprintf("SELECT id, name, email, role, is_active, created_at, updated_at FROM users%s ORDER BY created_at DESC LIMIT $%d OFFSET $%d", where, len(args)+1, len(args)+2)
+	args = append(args, pageSize, (page-1)*pageSize)
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
@@ -48,7 +68,7 @@ func HandleListUsers(c *fiber.Ctx) error {
 		users = append(users, user)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"users": users}})
+	return c.JSON(fiber.Map{"status": "success", "data": fiber.Map{"users": users}, "pagination": fiber.Map{"totalItems": total, "totalPages": int(math.Ceil(float64(total) / float64(pageSize))), "currentPage": page, "pageSize": pageSize}})
 }
 
 // HandleGetUserByID fetches a single user by their ID.
@@ -151,18 +171,11 @@ func HandleCreateUser(c *fiber.Ctx) error {
 	if clientOperationID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
 	}
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 255 || strings.TrimSpace(req.Email) == "" || len(req.Email) > 255 || len(req.Password) < 8 || len(req.Password) > 128 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Valid name, email, and password are required"})
+	}
 
-	// Log the request with actual values
-	log.Printf("Received create user request: Name=%s, Email=%s, Role=%s, ShopName=%s, IsActive=%v, Phone=%v, BusinessAddress=%v, MerchantID=%s",
-		req.Name,
-		req.Email,
-		req.Role,
-		req.ShopName,
-		req.IsActive,
-		utils.PointerToString(req.Phone),
-		utils.PointerToString(req.BusinessAddress),
-		req.MerchantID,
-	)
+	log.Printf("Received create user request: role=%s, merchantId=%s", req.Role, req.MerchantID)
 
 	// Validate and normalize role
 	normalizedRole, valid := utils.ValidateAndNormalizeRole(req.Role)
@@ -444,7 +457,7 @@ func HandleUpdateUser(c *fiber.Ctx) error {
 		req.IsActive = &isActiveVal2
 	}
 
-	log.Printf("Received update user request for ID %s: %+v", userID, req)
+	log.Printf("Received update user request for ID %s", userID)
 
 	// Build the update query dynamically based on which fields are provided
 	setValues := make([]string, 0)
@@ -586,8 +599,28 @@ func HandleGetMerchantsForSelection(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	query := "SELECT id, name FROM users WHERE role = 'merchant' AND is_active = TRUE"
-	rows, err := db.Query(ctx, query)
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 50)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 50
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	where := " WHERE role='merchant' AND is_active=TRUE"
+	args := []interface{}{}
+	if search != "" {
+		where += " AND (name ILIKE $1 OR email ILIKE $1)"
+		args = append(args, "%"+search+"%")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM users"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count merchants"})
+	}
+	query := fmt.Sprintf("SELECT id, name FROM users%s ORDER BY name LIMIT $%d OFFSET $%d", where, len(args)+1, len(args)+2)
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error querying merchants for selection: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve merchants"})
@@ -604,5 +637,5 @@ func HandleGetMerchantsForSelection(c *fiber.Ctx) error {
 		merchants = append(merchants, merchant)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": merchants})
+	return c.JSON(fiber.Map{"status": "success", "data": merchants, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }

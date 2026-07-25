@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"app/database"
+	"app/middleware"
 	"app/models"
 	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 // HandleGetShopProfile godoc
@@ -27,16 +27,18 @@ func HandleGetShopProfile(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	// Get user from JWT claims
-	token := c.Locals("user").(*jwt.Token)
-	claims := token.Claims.(jwt.MapClaims)
-	userID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	userID := claims.UserID
 
 	var user models.User
 	var shop models.Shop
 
 	// 1. Fetch user details
 	userQuery := `SELECT id, name, email, role, is_active, assigned_shop_id, merchant_id, created_at, updated_at FROM users WHERE id = $1`
-	err := db.QueryRow(ctx, userQuery, userID).Scan(
+	err = db.QueryRow(ctx, userQuery, userID).Scan(
 		&user.ID, &user.Name, &user.Email, &user.Role, &user.IsActive,
 		&user.AssignedShopID, &user.MerchantID, &user.CreatedAt, &user.UpdatedAt,
 	)

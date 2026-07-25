@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -65,6 +66,9 @@ func HandleUpdateAdminProfile(c *fiber.Ctx) error {
 	// Handle password update
 	if password, ok := updates["password"]; ok {
 		if passwordStr, ok := password.(string); ok && passwordStr != "" {
+			if len(passwordStr) < 8 || len(passwordStr) > 128 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Password must be between 8 and 128 characters"})
+			}
 			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(passwordStr), bcrypt.DefaultCost)
 			if err != nil {
 				log.Printf("Error hashing new password for user %s: %v", userID, err)
@@ -136,7 +140,7 @@ func HandleGetAdminProfile(c *fiber.Ctx) error {
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Admin profile not found"})
 		}
 		log.Printf("Error fetching admin profile for user %s: %v", userID, err)

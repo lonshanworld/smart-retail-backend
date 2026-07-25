@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleDeleteShop permanently deletes a shop.
@@ -139,8 +140,12 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 
 	for key, value := range updates {
 		switch key {
-		case "name", "merchant_id", "address", "phone", "tax_rate", "taxRate", "is_active", "is_primary":
+		case "name", "merchant_id", "address", "phone", "tax_rate", "is_active", "is_primary":
 			setParts = append(setParts, fmt.Sprintf("%s = $%d", key, argId))
+			args = append(args, value)
+			argId++
+		case "taxRate":
+			setParts = append(setParts, fmt.Sprintf("tax_rate = $%d", argId))
 			args = append(args, value)
 			argId++
 		default:
@@ -163,7 +168,7 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 		}
 		log.Printf("Error updating shop %s: %v", shopID, err)
@@ -183,17 +188,31 @@ func HandleUpdateShop(c *fiber.Ctx) error {
 // HandleCreateShop creates a new shop.
 // POST /api/v1/admin/shops
 func HandleCreateShop(c *fiber.Ctx) error {
-	// Log raw body for debugging
-	log.Printf("Raw request body: %s", string(c.Body()))
-
 	var req models.CreateShopRequest
 	if err := c.BodyParser(&req); err != nil {
 		log.Printf("Error parsing body: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Cannot parse JSON"})
 	}
-
-	log.Printf("Create shop request: name=%s, merchantId=%s, address=%v, phone=%v, isActive=%v, isPrimary=%v",
-		req.Name, req.MerchantID, req.Address, req.Phone, req.IsActive, req.IsPrimary)
+	claims, claimErr := middleware.ExtractClaims(c)
+	if claimErr != nil {
+		return claimErr
+	}
+	if claims.Role == "merchant" {
+		req.MerchantID = claims.UserID
+		if !req.IsActive {
+			req.IsActive = true
+		}
+	}
+	if req.MerchantID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "merchantId is required"})
+	}
+	clientOperationID := c.Get("X-Client-Operation-Id")
+	if clientOperationID == "" {
+		clientOperationID = c.Query("clientOperationId")
+	}
+	if claims.Role == "merchant" && clientOperationID == "" {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
+	}
 
 	// Convert empty strings to nil for optional fields
 	var addressVal interface{}
@@ -212,6 +231,20 @@ func HandleCreateShop(c *fiber.Ctx) error {
 
 	db := database.GetDB()
 	ctx := context.Background()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
+	}
+	defer tx.Rollback(ctx)
+	if clientOperationID != "" {
+		claimed, claimErr := claimInventoryOperation(ctx, tx, clientOperationID, "create_shop", claims.UserID, nil)
+		if claimErr != nil {
+			return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
+		}
+		if !claimed {
+			return c.Status(200).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+		}
+	}
 	query := `
 		INSERT INTO shops (name, merchant_id, address, phone, tax_rate, is_active, is_primary)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -225,13 +258,16 @@ func HandleCreateShop(c *fiber.Ctx) error {
 	if req.TaxRate != nil {
 		taxRate = *req.TaxRate
 	}
-	err := db.QueryRow(ctx, query, req.Name, req.MerchantID, addressVal, phoneVal, taxRate, req.IsActive, req.IsPrimary).Scan(
+	err = tx.QueryRow(ctx, query, req.Name, req.MerchantID, addressVal, phoneVal, taxRate, req.IsActive, req.IsPrimary).Scan(
 		&newShop.ID, &newShop.Name, &newShop.MerchantID, &address, &phone, &newShop.TaxRate, &newShop.IsActive, &newShop.IsPrimary, &newShop.CreatedAt, &newShop.UpdatedAt,
 	)
 
 	if err != nil {
 		log.Printf("Error creating shop: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create shop"})
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to commit shop"})
 	}
 
 	if address.Valid {
@@ -257,7 +293,7 @@ func HandleGetShopByID(c *fiber.Ctx) error {
 	var s models.Shop
 	var address, phone sql.NullString
 	if err := row.Scan(&s.ID, &s.Name, &s.MerchantID, &address, &phone, &s.TaxRate, &s.IsActive, &s.IsPrimary, &s.CreatedAt, &s.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 		}
 		log.Printf("Error scanning shop row: %v", err)
@@ -283,6 +319,12 @@ func HandleListShops(c *fiber.Ctx) error {
 	// --- Pagination Parameters ---
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
 
 	// --- Filtering Parameters ---

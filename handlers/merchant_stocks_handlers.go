@@ -6,123 +6,74 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
-	"log"
-	"strconv"
-
 	"github.com/gofiber/fiber/v2"
+	"strconv"
 )
 
-// HandleGetCombinedStocks handles fetching a combined, paginated list of all inventory items from all shops.
+// HandleGetCombinedStocks returns every canonical stock balance across the
+// merchant's shops with stable pagination and optional name/SKU/shop filters.
 func HandleGetCombinedStocks(c *fiber.Ctx) error {
-	db := database.GetDB()
-	ctx := context.Background()
-
 	claims, err := middleware.ExtractClaims(c)
 	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"success": false,
-			"message": "Unauthorized",
-		})
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
 	}
-	merchantId := claims.UserID
-
 	page, _ := strconv.Atoi(c.Query("page", "1"))
-	pageSize, _ := strconv.Atoi(c.Query("pageSize", "20"))
-	searchTerm := c.Query("searchTerm")
-	offset := (page - 1) * pageSize
-
-	// Base query
-	query := `
-		SELECT
-			i.id, i.name, i.sku, ss.quantity, i.selling_price, i.original_price, s.name as shop_name, s.id as shop_id,
-			i.category_id, i.subcategory_id, i.brand_id,
-			c.id, c.name, c.description,
-			sc.id, sc.name, sc.description,
-			b.id, b.name, b.description
-		FROM inventory_items i
-		JOIN shop_stock ss ON i.id = ss.inventory_item_id
-		JOIN shops s ON ss.shop_id = s.id
-		LEFT JOIN categories c ON i.category_id = c.id
-		LEFT JOIN subcategories sc ON i.subcategory_id = sc.id
-		LEFT JOIN brands b ON i.brand_id = b.id
-		WHERE i.merchant_id = $1
-	`
-	countQuery := `SELECT COUNT(*) FROM inventory_items i JOIN shop_stock ss ON i.id = ss.inventory_item_id JOIN shops s ON ss.shop_id = s.id WHERE i.merchant_id = $1`
-
-	args := []interface{}{merchantId}
-	countArgs := []interface{}{merchantId}
-
-	// Add search term if provided
-	if searchTerm != "" {
-		query += " AND i.name ILIKE $2"
-		countQuery += " AND i.name ILIKE $2"
-		args = append(args, "%"+searchTerm+"%")
-		countArgs = append(countArgs, "%"+searchTerm+"%")
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
 	}
-
-	// Get total count
-	var totalCount int
-	err = db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount)
-	if err != nil {
-		log.Printf("Error counting combined stocks: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	if size < 1 || size > 100 {
+		size = 20
 	}
-
-	// Add pagination to the main query
-	pagingArgs := []interface{}{pageSize, offset}
-	query += " ORDER BY i.name, s.name LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
-	args = append(args, pagingArgs...)
-
-	// Execute the main query
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	offset := (page - 1) * size
+	search := c.Query("searchTerm")
+	shopID := c.Query("shopId")
+	db, ctx := database.GetDB(), context.Background()
+	where := ` WHERE ii.merchant_id=$1`
+	args := []interface{}{claims.UserID}
+	if search != "" {
+		where += " AND (si.name ILIKE $2 OR si.sku ILIKE $2)"
+		args = append(args, "%"+search+"%")
+	}
+	if shopID != "" {
+		where += ` AND ii.shop_id=$` + strconv.Itoa(len(args)+1)
+		args = append(args, shopID)
+	}
+	var total int
+	if err = db.QueryRow(ctx, `SELECT COUNT(*) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id`+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Database error"})
+	}
+	query := `SELECT si.id,si.name,si.sku,ii.quantity_on_hand,COALESCE(pp.selling_price,0),COALESCE(pp.cost_price,0),s.name,s.id,p.brand_id FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN products p ON p.id=si.product_id JOIN shops s ON s.id=ii.shop_id LEFT JOIN LATERAL(SELECT selling_price,cost_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE` + where + ` ORDER BY si.name,s.name LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+	args = append(args, size, offset)
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error fetching combined stocks: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Database error"})
 	}
 	defer rows.Close()
-
 	items := make([]models.CombinedStockItem, 0)
 	for rows.Next() {
-		var item models.CombinedStockItem
-		var categoryID, categoryName, categoryDescription sql.NullString
-		var subcategoryID, subcategoryName, subcategoryDescription sql.NullString
-		var brandID, brandName, brandDescription sql.NullString
-		if err := rows.Scan(
-			&item.ID, &item.Name, &item.SKU, &item.Quantity, &item.SellingPrice, &item.OriginalPrice, &item.ShopName, &item.ShopID,
-			&item.CategoryID, &item.SubcategoryID, &item.BrandID,
-			&categoryID, &categoryName, &categoryDescription,
-			&subcategoryID, &subcategoryName, &subcategoryDescription,
-			&brandID, &brandName, &brandDescription,
-		); err != nil {
-			log.Printf("Error scanning combined stock item: %v", err)
+		var i models.CombinedStockItem
+		var sku, brand sql.NullString
+		var q float64
+		var cost float64
+		if err = rows.Scan(&i.ID, &i.Name, &sku, &q, &i.SellingPrice, &cost, &i.ShopName, &i.ShopID, &brand); err != nil {
 			continue
 		}
-		if categoryID.Valid {
-			item.CategoryObj = &models.Category{ID: categoryID.String, Name: categoryName.String}
-			if categoryDescription.Valid {
-				item.CategoryObj.Description = &categoryDescription.String
-			}
+		if sku.Valid {
+			i.SKU = &sku.String
 		}
-		if subcategoryID.Valid {
-			item.SubcategoryObj = &models.Subcategory{ID: subcategoryID.String, Name: subcategoryName.String}
-			if subcategoryDescription.Valid {
-				item.SubcategoryObj.Description = &subcategoryDescription.String
-			}
+		if brand.Valid {
+			i.BrandID = &brand.String
 		}
-		if brandID.Valid {
-			item.BrandObj = &models.Brand{ID: brandID.String, Name: brandName.String}
-			if brandDescription.Valid {
-				item.BrandObj.Description = &brandDescription.String
-			}
-		}
-		items = append(items, item)
+		i.Quantity = int(q)
+		i.OriginalPrice = &cost
+		items = append(items, i)
 	}
-
-	return c.JSON(fiber.Map{
-		"status": "success",
-		"data": fiber.Map{
-			"items":      items,
-			"totalItems": totalCount,
-		},
-	})
+	return c.JSON(fiber.Map{"status": "success", "data": items, "pagination": models.Pagination{TotalItems: total, TotalPages: (total + size - 1) / size, CurrentPage: page, PageSize: size}})
 }

@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -45,15 +47,37 @@ func HandleGetStaffDashboardSummary(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve sales summary"})
 	}
 
-	// Get recent activities (e.g., last 5 sales)
+	activityPage, _ := strconv.Atoi(c.Query("activityPage", "1"))
+	activityPageSize, _ := strconv.Atoi(c.Query("activityPageSize", "5"))
+	if activityPage < 1 {
+		activityPage = 1
+	}
+	if activityPageSize < 1 || activityPageSize > 100 {
+		activityPageSize = 5
+	}
+	activityWhere := " WHERE staff_id=$1"
+	activityArgs := []interface{}{staffID}
+	if from := strings.TrimSpace(c.Query("from")); from != "" {
+		activityWhere += " AND sale_date >= $" + strconv.Itoa(len(activityArgs)+1)
+		activityArgs = append(activityArgs, from)
+	}
+	if to := strings.TrimSpace(c.Query("to")); to != "" {
+		activityWhere += " AND sale_date <= $" + strconv.Itoa(len(activityArgs)+1)
+		activityArgs = append(activityArgs, to)
+	}
+	var activityTotal int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales"+activityWhere, activityArgs...).Scan(&activityTotal); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count recent activities"})
+	}
+	// Recent activities are paginated so the summary cannot grow without bound.
 	activityQuery := `
 		SELECT id, total_amount, sale_date
 		FROM sales
-		WHERE staff_id = $1
-		ORDER BY sale_date DESC
-		LIMIT 5
-	`
-	rows, err := db.Query(ctx, activityQuery, staffID)
+		` + activityWhere + `
+		ORDER BY sale_date DESC, id DESC
+		LIMIT $` + strconv.Itoa(len(activityArgs)+1) + ` OFFSET $` + strconv.Itoa(len(activityArgs)+2)
+	activityArgs = append(activityArgs, activityPageSize, (activityPage-1)*activityPageSize)
+	rows, err := db.Query(ctx, activityQuery, activityArgs...)
 	if err != nil {
 		log.Printf("Error getting recent activities: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve recent activities"})
@@ -81,7 +105,8 @@ func HandleGetStaffDashboardSummary(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    summary,
+		"success":    true,
+		"data":       summary,
+		"pagination": fiber.Map{"totalItems": activityTotal, "totalPages": (activityTotal + activityPageSize - 1) / activityPageSize, "currentPage": activityPage, "pageSize": activityPageSize},
 	})
 }

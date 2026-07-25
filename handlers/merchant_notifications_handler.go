@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -24,12 +25,34 @@ func HandleGetNotifications(c *fiber.Ctx) error {
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
 	offset := (page - 1) * pageSize
+	where := " WHERE recipient_user_id = $1"
+	args := []interface{}{recipientId}
+	if read := c.Query("isRead"); read != "" {
+		if value, parseErr := strconv.ParseBool(read); parseErr == nil {
+			where += " AND is_read = $2"
+			args = append(args, value)
+		}
+	}
+	if notificationType := strings.TrimSpace(c.Query("type")); notificationType != "" {
+		where += " AND notification_type = $" + strconv.Itoa(len(args)+1)
+		args = append(args, notificationType)
+	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += " AND (title ILIKE $" + strconv.Itoa(len(args)+1) + " OR message ILIKE $" + strconv.Itoa(len(args)+1) + ")"
+		args = append(args, "%"+search+"%")
+	}
 
 	// Get total count
 	var totalCount int
-	countQuery := "SELECT COUNT(*) FROM notifications WHERE recipient_user_id = $1"
-	err = db.QueryRow(ctx, countQuery, recipientId).Scan(&totalCount)
+	countQuery := "SELECT COUNT(*) FROM notifications" + where
+	err = db.QueryRow(ctx, countQuery, args...).Scan(&totalCount)
 	if err != nil {
 		log.Printf("Error counting notifications: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -39,11 +62,12 @@ func HandleGetNotifications(c *fiber.Ctx) error {
 	query := `
 		SELECT id, recipient_user_id, title, message, notification_type, related_entity_id, related_entity_type, is_read, created_at, updated_at
 		FROM notifications
-		WHERE recipient_user_id = $1
+		` + where + `
 		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
+		LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2) + `
 	`
-	rows, err := db.Query(ctx, query, recipientId, pageSize, offset)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error fetching notifications: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})

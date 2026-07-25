@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleListMerchants retrieves a paginated and filtered list of merchants (users with the 'merchant' role).
@@ -22,6 +23,12 @@ func HandleListMerchants(c *fiber.Ctx) error {
 	// --- Query Parameters ---
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	nameFilter := c.Query("name")
 	emailFilter := c.Query("email")
 	isActiveFilter := c.Query("isActive")
@@ -142,7 +149,7 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
 		}
 		log.Printf("Error fetching merchant by ID %s: %v", merchantIdOrUserId, err)
@@ -153,30 +160,45 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
 		merchant.Phone = &phone.String
 	}
 
-	// Now fetch all shops for this merchant
+	shopPage := c.QueryInt("shopPage", 1)
+	shopPageSize := c.QueryInt("shopPageSize", 20)
+	if shopPage < 1 {
+		shopPage = 1
+	}
+	if shopPageSize < 1 || shopPageSize > 100 {
+		shopPageSize = 20
+	}
+	var totalShops int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM shops WHERE merchant_id = $1`, merchantIdOrUserId).Scan(&totalShops); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count merchant shops"})
+	}
+
+	// Fetch a bounded, paginated shop list for this merchant.
 	shopsQuery := `
         SELECT id, merchant_id, name, address, phone, is_active, is_primary, created_at, updated_at
         FROM shops
         WHERE merchant_id = $1
 	ORDER BY created_at DESC, is_primary DESC
+	LIMIT $2 OFFSET $3
     `
 
-	rows, err := db.Query(ctx, shopsQuery, merchantIdOrUserId)
+	rows, err := db.Query(ctx, shopsQuery, merchantIdOrUserId, shopPageSize, (shopPage-1)*shopPageSize)
 	if err != nil {
 		log.Printf("Error fetching shops for merchant %s: %v", merchantIdOrUserId, err)
 		// Return merchant without shops but with proper structure
 		return c.JSON(fiber.Map{
 			"status": "success",
 			"data": fiber.Map{
-				"id":        merchant.ID,
-				"name":      merchant.Name,
-				"email":     merchant.Email,
-				"phone":     merchant.Phone,
-				"isActive":  merchant.IsActive,
-				"shopName":  merchant.ShopName,
-				"createdAt": merchant.CreatedAt,
-				"updatedAt": merchant.UpdatedAt,
-				"shops":     []models.Shop{}, // Empty array instead of nil
+				"id":              merchant.ID,
+				"name":            merchant.Name,
+				"email":           merchant.Email,
+				"phone":           merchant.Phone,
+				"isActive":        merchant.IsActive,
+				"shopName":        merchant.ShopName,
+				"createdAt":       merchant.CreatedAt,
+				"updatedAt":       merchant.UpdatedAt,
+				"shops":           []models.Shop{}, // Empty array instead of nil
+				"shopsPagination": fiber.Map{"totalItems": totalShops, "totalPages": (totalShops + shopPageSize - 1) / shopPageSize, "currentPage": shopPage, "pageSize": shopPageSize},
 			},
 		})
 	}
@@ -230,15 +252,16 @@ func HandleGetMerchantByID(c *fiber.Ctx) error {
 
 	// Construct response
 	responseData := fiber.Map{
-		"id":        merchant.ID,
-		"name":      merchant.Name,
-		"email":     merchant.Email,
-		"phone":     merchant.Phone,
-		"isActive":  merchant.IsActive,
-		"shopName":  merchant.ShopName,
-		"createdAt": merchant.CreatedAt,
-		"updatedAt": merchant.UpdatedAt,
-		"shops":     shops,
+		"id":              merchant.ID,
+		"name":            merchant.Name,
+		"email":           merchant.Email,
+		"phone":           merchant.Phone,
+		"isActive":        merchant.IsActive,
+		"shopName":        merchant.ShopName,
+		"createdAt":       merchant.CreatedAt,
+		"updatedAt":       merchant.UpdatedAt,
+		"shops":           shops,
+		"shopsPagination": fiber.Map{"totalItems": totalShops, "totalPages": (totalShops + shopPageSize - 1) / shopPageSize, "currentPage": shopPage, "pageSize": shopPageSize},
 	}
 
 	log.Printf("Response data keys: %v", getMapKeys(responseData))

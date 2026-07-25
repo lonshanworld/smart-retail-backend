@@ -6,9 +6,12 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleListShopInvoices lists invoices for a given shop (accessible to merchant owners and assigned staff)
@@ -36,7 +39,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 		// verify merchant owns the shop
 		var ownerId string
 		if err := db.QueryRow(ctx, "SELECT merchant_id FROM shops WHERE id = $1", shopId).Scan(&ownerId); err != nil {
-			if err == sql.ErrNoRows {
+			if err == pgx.ErrNoRows {
 				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 			}
 			log.Printf("Error checking shop owner: %v", err)
@@ -67,20 +70,43 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 
 	page := c.QueryInt("page", 1)
 	pageSize := c.QueryInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
 
+	where := " WHERE i.shop_id = $1"
+	args := []interface{}{shopId}
+	if status := strings.TrimSpace(c.Query("paymentStatus")); status != "" {
+		where += fmt.Sprintf(" AND i.payment_status = $%d", len(args)+1)
+		args = append(args, status)
+	}
+	if from := strings.TrimSpace(c.Query("from")); from != "" {
+		where += fmt.Sprintf(" AND i.invoice_date >= $%d", len(args)+1)
+		args = append(args, from)
+	}
+	if to := strings.TrimSpace(c.Query("to")); to != "" {
+		where += fmt.Sprintf(" AND i.invoice_date < ($%d::date + INTERVAL '1 day')", len(args)+1)
+		args = append(args, to)
+	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += fmt.Sprintf(" AND (i.invoice_number ILIKE $%d OR COALESCE(i.notes,'') ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
 	query := `
 		 SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
 			 i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
 			 i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
         FROM invoices i
 		 JOIN shops s ON s.id = i.shop_id
-		WHERE i.shop_id = $1
-		ORDER BY i.invoice_date DESC
-        LIMIT $2 OFFSET $3
+		` + where + fmt.Sprintf(" ORDER BY i.invoice_date DESC, i.id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2) + `
     `
 
-	rows, err := db.Query(ctx, query, shopId, pageSize, offset)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error listing shop invoices: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve invoices"})
@@ -108,7 +134,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 
@@ -117,7 +143,6 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 			log.Printf("Error querying sale items for invoice %s: %v", inv.ID, err)
 			inv.Items = []models.SaleItem{}
 		} else {
-			defer itemRows.Close()
 			var items []models.SaleItem
 			for itemRows.Next() {
 				var si models.SaleItem
@@ -135,6 +160,7 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 				}
 				items = append(items, si)
 			}
+			itemRows.Close()
 			inv.Items = items
 		}
 
@@ -142,7 +168,9 @@ func HandleListShopInvoices(c *fiber.Ctx) error {
 	}
 
 	var totalItems int
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM invoices WHERE shop_id = $1", shopId).Scan(&totalItems); err != nil {
+	countQuery := "SELECT COUNT(*) FROM invoices i" + where
+	countArgs := args[:len(args)-2]
+	if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting shop invoices: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count invoices"})
 	}
@@ -209,7 +237,7 @@ func HandleGetShopInvoiceByID(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 	rows, err := db.Query(ctx, itemsQuery, inv.SaleID)
@@ -301,19 +329,42 @@ func HandleListStaffInvoices(c *fiber.Ctx) error {
 
 	page := c.QueryInt("page", 1)
 	pageSize := c.QueryInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
 
+	where := " WHERE shop_id = $1"
+	args := []interface{}{shopId}
+	if status := strings.TrimSpace(c.Query("paymentStatus")); status != "" {
+		where += fmt.Sprintf(" AND payment_status = $%d", len(args)+1)
+		args = append(args, status)
+	}
+	if from := strings.TrimSpace(c.Query("from")); from != "" {
+		where += fmt.Sprintf(" AND invoice_date >= $%d", len(args)+1)
+		args = append(args, from)
+	}
+	if to := strings.TrimSpace(c.Query("to")); to != "" {
+		where += fmt.Sprintf(" AND invoice_date < ($%d::date + INTERVAL '1 day')", len(args)+1)
+		args = append(args, to)
+	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += fmt.Sprintf(" AND (invoice_number ILIKE $%d OR COALESCE(notes,'') ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
 	query := `
         SELECT id, sale_id, invoice_number, merchant_id, shop_id, customer_id,
                invoice_date, due_date, subtotal, discount_amount, tax_amount,
-               total_amount, payment_status, notes, created_at, updated_at
+               delivery_charge, total_amount, payment_status, notes, created_at, updated_at
         FROM invoices
-        WHERE shop_id = $1
-        ORDER BY invoice_date DESC
-        LIMIT $2 OFFSET $3
+		` + where + fmt.Sprintf(" ORDER BY invoice_date DESC, id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2) + `
     `
 
-	rows, err := db.Query(ctx, query, shopId, pageSize, offset)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error listing staff invoices: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve invoices"})
@@ -337,7 +388,8 @@ func HandleListStaffInvoices(c *fiber.Ctx) error {
 	}
 
 	var totalItems int
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM invoices WHERE shop_id = $1", shopId).Scan(&totalItems); err != nil {
+	countArgs := args[:len(args)-2]
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM invoices"+where, countArgs...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting staff invoices: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count invoices"})
 	}
@@ -412,7 +464,7 @@ func HandleGetStaffInvoiceByID(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 	rows, err := db.Query(ctx, itemsQuery, inv.SaleID)

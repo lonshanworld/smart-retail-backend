@@ -26,6 +26,10 @@ func HandleGenerateText(c *fiber.Ctx) error {
 			"message": "Invalid request body",
 		})
 	}
+	body.Prompt = strings.TrimSpace(body.Prompt)
+	if body.Prompt == "" || len(body.Prompt) > 4000 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "prompt must contain between 1 and 4000 characters"})
+	}
 
 	// Initialize the Gemini client
 	ctx := context.Background()
@@ -37,9 +41,10 @@ func HandleGenerateText(c *fiber.Ctx) error {
 			"message": "Failed to initialize Gemini client",
 		})
 	}
+	defer client.Close()
 
 	// Use the Gemini model to generate text
-	model := client.GenerativeModel("gemini-1.5-pro-latest")
+	model := client.GenerativeModel(providerModelName(aiProviderGemini))
 	resp, err := model.GenerateContent(ctx, genai.Text(body.Prompt))
 	if err != nil {
 		log.Printf("Error generating content: %v", err)
@@ -71,22 +76,22 @@ func HandleMultimodalText(c *fiber.Ctx) error {
 		})
 	}
 
-    // Extract image format and data
-    parts := strings.Split(body.ImageData, ";base64,")
-    if len(parts) != 2 {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid image data format"})
-    }
-    
-    mimeTypeParts := strings.Split(strings.TrimPrefix(parts[0], "data:"), "/")
-    if len(mimeTypeParts) != 2 {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid image mime type"})
-    }
-    imageFormat := mimeTypeParts[1]
-    
-    imageData, err := base64.StdEncoding.DecodeString(parts[1])
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Failed to decode image data"})
-    }
+	// Extract image format and data
+	parts := strings.Split(body.ImageData, ";base64,")
+	if len(parts) != 2 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid image data format"})
+	}
+
+	mimeTypeParts := strings.Split(strings.TrimPrefix(parts[0], "data:"), "/")
+	if len(mimeTypeParts) != 2 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid image mime type"})
+	}
+	imageFormat := mimeTypeParts[1]
+
+	imageData, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Failed to decode image data"})
+	}
 
 	// Initialize the Gemini client
 	ctx := context.Background()
@@ -101,7 +106,7 @@ func HandleMultimodalText(c *fiber.Ctx) error {
 	defer client.Close()
 
 	// Use the Gemini model for multimodal input
-	model := client.GenerativeModel("gemini-1.5-pro-latest")
+	model := client.GenerativeModel(providerModelName(aiProviderGemini))
 
 	// Create the prompt with text and image
 	prompt := []genai.Part{

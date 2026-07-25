@@ -22,7 +22,11 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Invalid token format"})
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &models.JwtClaims{}, func(token *jwt.Token) (interface{}, error) {
+	claims := &models.JwtClaims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		if token.Method == nil || token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+			return nil, jwt.ErrSignatureInvalid
+		}
 		return []byte(config.AppConfig.JWTSecret), nil
 	})
 
@@ -30,9 +34,8 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Invalid or expired token"})
 	}
 
-	claims, ok := token.Claims.(*models.JwtClaims)
-	if !ok {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to parse token claims"})
+	if claims.UserID == "" || claims.Role == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"status": "error", "message": "Invalid token claims"})
 	}
 
 	c.Locals("userID", claims.UserID)

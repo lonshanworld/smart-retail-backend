@@ -69,24 +69,27 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid endDate format"})
 	}
 
-	usePagination := c.Query("page") != "" || c.Query("pageSize") != ""
 	page := c.QueryInt("page", 1)
 	pageSize := c.QueryInt("pageSize", 10)
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 {
+	if pageSize < 1 || pageSize > 100 {
 		pageSize = 10
 	}
+	usePagination := true
 
-	// Query to get actual sale records (not aggregated)
+	// Fetch the selected sales and all of their items in one query. The previous
+	// implementation issued one additional query per sale (N+1), which made
+	// larger date ranges unnecessarily slow.
 	query := `
-        SELECT id, shop_id, merchant_id, sale_date, total_amount, 
-               applied_promotion_id, discount_amount, payment_type, payment_status,
-               created_at, updated_at
-        FROM sales
-        WHERE merchant_id = $1 AND sale_date BETWEEN $2 AND $3
-    `
+		WITH selected_sales AS (
+			SELECT id, shop_id, merchant_id, sale_date, total_amount,
+			       applied_promotion_id, discount_amount, payment_type, payment_status,
+			       created_at, updated_at
+			FROM sales
+			WHERE merchant_id = $1 AND sale_date BETWEEN $2 AND $3
+	`
 	args := []interface{}{merchantID, startDate, endDate}
 
 	// Add shop filter if provided
@@ -100,6 +103,18 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
 		args = append(args, pageSize, (page-1)*pageSize)
 	}
+	query += `
+		)
+		SELECT ss.id, ss.shop_id, ss.merchant_id, ss.sale_date, ss.total_amount,
+		       ss.applied_promotion_id, ss.discount_amount, ss.payment_type,
+		       ss.payment_status, ss.created_at, ss.updated_at,
+		       si.id, si.sale_id, si.inventory_item_id, si.item_name, si.item_sku,
+		       si.quantity_sold, si.selling_price_at_sale, si.original_price_at_sale,
+		       si.subtotal, si.created_at, si.updated_at
+		FROM selected_sales ss
+		LEFT JOIN sale_items si ON si.sale_id = ss.id
+		ORDER BY ss.sale_date DESC, si.created_at ASC
+	`
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
@@ -109,63 +124,76 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 	defer rows.Close()
 
 	sales := make([]models.Sale, 0)
+	saleIndexes := make(map[string]int)
 	for rows.Next() {
 		var sale models.Sale
+		var itemID, itemSaleID, itemInventoryID, itemName, itemSKU sql.NullString
+		// quantity_sold is NUMERIC(15,3) in the live schema. PostgreSQL may
+		// return values such as "4000e-3", which cannot be scanned into int64.
+		var itemQuantity sql.NullFloat64
+		var itemSellingPrice, itemOriginalPrice, itemSubtotal sql.NullFloat64
+		var itemCreatedAt, itemUpdatedAt sql.NullTime
 		if err := rows.Scan(
 			&sale.ID, &sale.ShopID, &sale.MerchantID, &sale.SaleDate,
 			&sale.TotalAmount, &sale.AppliedPromotionID, &sale.DiscountAmount,
 			&sale.PaymentType, &sale.PaymentStatus, &sale.CreatedAt, &sale.UpdatedAt,
+			&itemID, &itemSaleID, &itemInventoryID, &itemName, &itemSKU,
+			&itemQuantity, &itemSellingPrice, &itemOriginalPrice, &itemSubtotal,
+			&itemCreatedAt, &itemUpdatedAt,
 		); err != nil {
 			log.Printf("❌ [SALES REPORT] Scan error: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to process sales report data"})
 		}
 
-		// Fetch sale items for each sale
-		itemsQuery := `
-			SELECT id, sale_id, inventory_item_id, item_name, item_sku, 
-			       quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal,
-			       created_at, updated_at
-			FROM sale_items 
-			WHERE sale_id = $1
-		`
-		itemRows, err := db.Query(ctx, itemsQuery, sale.ID)
-		if err != nil {
-			log.Printf("⚠️  [SALES REPORT] Failed to fetch items for sale %s: %v", sale.ID, err)
-			sale.Items = []models.SaleItem{} // Empty items if fetch fails
-		} else {
-			items := make([]models.SaleItem, 0)
-			for itemRows.Next() {
-				var item models.SaleItem
-				var itemName sql.NullString
-				var itemSKU sql.NullString
-				var originalPrice sql.NullFloat64
-				if err := itemRows.Scan(
-					&item.ID, &item.SaleID, &item.InventoryItemID, &itemName,
-					&itemSKU, &item.QuantitySold, &item.SellingPriceAtSale,
-					&originalPrice, &item.Subtotal, &item.CreatedAt, &item.UpdatedAt,
-				); err != nil {
-					log.Printf("⚠️  [SALES REPORT] Failed to scan item: %v", err)
-					continue
-				}
-				if itemName.Valid {
-					value := itemName.String
-					item.ItemName = &value
-				}
-				if itemSKU.Valid {
-					value := itemSKU.String
-					item.ItemSKU = &value
-				}
-				if originalPrice.Valid {
-					value := originalPrice.Float64
-					item.OriginalPriceAtSale = &value
-				}
-				items = append(items, item)
-			}
-			itemRows.Close()
-			sale.Items = items
+		index, exists := saleIndexes[sale.ID]
+		if !exists {
+			sale.Items = make([]models.SaleItem, 0)
+			sales = append(sales, sale)
+			index = len(sales) - 1
+			saleIndexes[sale.ID] = index
 		}
 
-		sales = append(sales, sale)
+		if itemID.Valid {
+			item := models.SaleItem{ID: itemID.String}
+			if itemSaleID.Valid {
+				item.SaleID = itemSaleID.String
+			}
+			if itemInventoryID.Valid {
+				item.InventoryItemID = itemInventoryID.String
+			}
+			if itemQuantity.Valid {
+				item.QuantitySold = int(itemQuantity.Float64)
+			}
+			if itemSellingPrice.Valid {
+				item.SellingPriceAtSale = itemSellingPrice.Float64
+			}
+			if itemOriginalPrice.Valid {
+				value := itemOriginalPrice.Float64
+				item.OriginalPriceAtSale = &value
+			}
+			if itemSubtotal.Valid {
+				item.Subtotal = itemSubtotal.Float64
+			}
+			if itemCreatedAt.Valid {
+				item.CreatedAt = itemCreatedAt.Time
+			}
+			if itemUpdatedAt.Valid {
+				item.UpdatedAt = itemUpdatedAt.Time
+			}
+			if itemName.Valid {
+				value := itemName.String
+				item.ItemName = &value
+			}
+			if itemSKU.Valid {
+				value := itemSKU.String
+				item.ItemSKU = &value
+			}
+			sales[index].Items = append(sales[index].Items, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("❌ [SALES REPORT] Row iteration error: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to process sales report data"})
 	}
 
 	if usePagination {
@@ -190,6 +218,7 @@ func HandleGetSalesReport(c *fiber.Ctx) error {
 			"success": true,
 			"data": fiber.Map{
 				"items": sales,
+				"sales": sales,
 				"meta": fiber.Map{
 					"totalItems":  totalItems,
 					"currentPage": page,
@@ -225,15 +254,26 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	if shopID == "" || itemID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "shopId and itemId are required"})
 	}
+	if err := authorizeShopAccess(c, shopID); err != nil {
+		return err
+	}
+	var owned bool
+	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_items WHERE shop_id=$1 AND stock_item_id=$2 AND merchant_id=$3)`, shopID, itemID, merchantID).Scan(&owned); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to verify inventory ownership"})
+	}
+	if !owned {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "message": "Inventory item not found in shop"})
+	}
 
 	// 1. Fetch historical sales data for the item
 	query := `
         SELECT s.sale_date, si.quantity_sold
         FROM sales s
         JOIN sale_items si ON s.id = si.sale_id
-        WHERE s.shop_id = $1 AND si.inventory_item_id = $2 AND s.merchant_id = $3
+        WHERE s.shop_id = $1 AND si.stock_item_id = $2 AND s.merchant_id = $3
         AND s.sale_date >= NOW() - INTERVAL '90 days'
-        ORDER BY s.sale_date
+		ORDER BY s.sale_date
+		LIMIT 5000
     `
 	rows, err := db.Query(ctx, query, shopID, itemID, merchantID)
 	if err != nil {
@@ -244,8 +284,12 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	var historicalData []models.HistoricalSale
 	for rows.Next() {
 		var hs models.HistoricalSale
-		if err := rows.Scan(&hs.SaleDate, &hs.QuantitySold); err != nil {
+		var quantity sql.NullFloat64
+		if err := rows.Scan(&hs.SaleDate, &quantity); err != nil {
 			continue
+		}
+		if quantity.Valid {
+			hs.QuantitySold = int(quantity.Float64)
 		}
 		historicalData = append(historicalData, hs)
 	}
@@ -253,9 +297,9 @@ func HandleGetSalesForecast(c *fiber.Ctx) error {
 	// 2. Fetch product and shop details for context
 	var productName, shopName string
 	var currentStock int
-	_ = db.QueryRow(ctx, "SELECT name FROM inventory_items WHERE id = $1", itemID).Scan(&productName)
-	_ = db.QueryRow(ctx, "SELECT name FROM shops WHERE id = $1", shopID).Scan(&shopName)
-	_ = db.QueryRow(ctx, "SELECT quantity FROM shop_stock WHERE shop_id = $1 AND inventory_item_id = $2", shopID, itemID).Scan(&currentStock)
+	_ = db.QueryRow(ctx, "SELECT name FROM stock_items WHERE id = $1 AND merchant_id = $2", itemID, merchantID).Scan(&productName)
+	_ = db.QueryRow(ctx, "SELECT name FROM shops WHERE id = $1 AND merchant_id = $2", shopID, merchantID).Scan(&shopName)
+	_ = db.QueryRow(ctx, "SELECT quantity_on_hand FROM inventory_items WHERE shop_id = $1 AND stock_item_id = $2", shopID, itemID).Scan(&currentStock)
 
 	// 3. Construct the prompt for the Gemini API
 	prompt := constructForecastPrompt(productName, shopName, currentStock, historicalData)
@@ -325,7 +369,7 @@ func parseForecastResponse(rawText, productName, shopName string, currentStock i
 	// Clean the response to get only the JSON object
 	jsonStr := extractJSON(rawText)
 	if jsonStr == "" {
-		log.Printf("Could not extract JSON from AI response: %s", rawText)
+		log.Printf("Could not extract JSON from AI response")
 		return nil, fmt.Errorf("failed to parse AI response format")
 	}
 
@@ -338,7 +382,7 @@ func parseForecastResponse(rawText, productName, shopName string, currentStock i
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &geminiJSON); err != nil {
-		log.Printf("Error parsing AI JSON: %v\nRaw JSON: %s", err, jsonStr)
+		log.Printf("Error parsing AI JSON: %v", err)
 		return nil, fmt.Errorf("failed to parse AI forecast data")
 	}
 
@@ -355,7 +399,7 @@ func parseForecastResponse(rawText, productName, shopName string, currentStock i
 		DailyForecast: geminiJSON.Forecast,
 		AiAnalysis: models.AiAnalysis{
 			Summary:         geminiJSON.Summary,
-			AnalysisHTML:    geminiJSON.AnalysisHTML,
+			AnalysisHTML:    escapeAIHTML(geminiJSON.AnalysisHTML),
 			PositiveFactors: geminiJSON.PositiveFactors,
 			NegativeFactors: geminiJSON.NegativeFactors,
 		},

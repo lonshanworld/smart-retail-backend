@@ -5,161 +5,100 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
-	"log"
-
+	"fmt"
 	"github.com/gofiber/fiber/v2"
+	"strings"
 )
 
-// HandleGetShopInventory godoc
-// @Summary Get shop inventory
-// @Description Fetches a list of all inventory items for the staff's assigned shop.
-// @Tags Shop
-// @Accept  json
-// @Produce  json
-// @Security ApiKeyAuth
-// @Success 200 {array} models.ShopInventoryItem
-// @Failure 401 {object} fiber.Map{message=string}
-// @Failure 404 {object} fiber.Map{message=string}
-// @Failure 500 {object} fiber.Map{message=string}
-// @Router /api/v1/shop/inventory [get]
 func HandleGetShopInventory(c *fiber.Ctx) error {
-	db := database.GetDB()
-	ctx := context.Background()
-
 	claims, err := middleware.ExtractClaims(c)
 	if err != nil {
 		return err
 	}
-	userID := claims.UserID
-
-	var assignedShopID string
-	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
-	if err := db.QueryRow(ctx, userQuery, userID).Scan(&assignedShopID); err != nil {
-		log.Printf("Error fetching assigned shop ID for user %s: %v", userID, err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found for this user"})
+	db, ctx := database.GetDB(), context.Background()
+	shopID := c.Query("shopId")
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, claims.UserID)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found"})
+		}
+	} else if claims.Role == "merchant" {
+		if shopID == "" {
+			return c.Status(400).JSON(fiber.Map{"status": "error", "message": "shopId is required"})
+		}
+		if err = authorizeShopAccess(c, shopID); err != nil {
+			return err
+		}
+	} else {
+		return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Shop access denied"})
 	}
-
-	query := `
-        SELECT
-            ss.id, 
-            ii.id as product_id,
-            ii.name,
-            COALESCE(ii.sku, ''),
-            ss.quantity,
-            ii.selling_price
-        FROM 
-            shop_stock ss
-        JOIN 
-            inventory_items ii ON ss.inventory_item_id = ii.id
-        WHERE 
-            ss.shop_id = $1
-    `
-	rows, err := db.Query(ctx, query, assignedShopID)
+	page := c.QueryInt("page", 1)
+	size := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	where := " WHERE ii.shop_id=$1"
+	args := []interface{}{shopID}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += fmt.Sprintf(" AND (si.name ILIKE $%d OR COALESCE(si.sku,'') ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	if categoryID := strings.TrimSpace(c.Query("categoryId")); categoryID != "" {
+		where += fmt.Sprintf(" AND EXISTS(SELECT 1 FROM product_categories pc WHERE pc.product_id=si.product_id AND pc.category_id=$%d)", len(args)+1)
+		args = append(args, categoryID)
+	}
+	var total int
+	if err = db.QueryRow(ctx, `SELECT COUNT(*) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id`+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count shop inventory"})
+	}
+	query := `SELECT ii.id,si.id,si.name,COALESCE(si.sku,''),ii.quantity_on_hand,COALESCE(pp.selling_price,0) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id LEFT JOIN LATERAL(SELECT selling_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE` + where + fmt.Sprintf(" ORDER BY si.name, si.id LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, size, (page-1)*size)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
-		log.Printf("Error querying shop inventory: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shop inventory"})
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shop inventory"})
 	}
 	defer rows.Close()
-
-	var items []models.ShopInventoryItem
+	items := make([]models.ShopInventoryItem, 0)
 	for rows.Next() {
-		var item models.ShopInventoryItem
-		if err := rows.Scan(&item.ID, &item.ProductID, &item.Name, &item.SKU, &item.Quantity, &item.SellingPrice); err != nil {
-			log.Printf("Error scanning shop inventory item: %v", err)
-			continue // Or handle more gracefully
+		var i models.ShopInventoryItem
+		var q float64
+		if err = rows.Scan(&i.ID, &i.ProductID, &i.Name, &i.SKU, &q, &i.SellingPrice); err == nil {
+			i.Quantity = int(q)
+			items = append(items, i)
 		}
-		items = append(items, item)
 	}
-
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "data": items, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + size - 1) / size, "currentPage": page, "pageSize": size}})
 }
 
-// HandleStockIn godoc
-// @Summary Stock in items
-// @Description Updates the quantities of items in the shop's inventory (Stock In).
-// @Tags Shop
-// @Accept  json
-// @Produce  json
-// @Security ApiKeyAuth
-// @Param   items  body  models.StockInRequest  true  "Stock In Request"
-// @Success 200 {object} fiber.Map{message=string}
-// @Failure 400 {object} fiber.Map{message=string}
-// @Failure 401 {object} fiber.Map{message=string}
-// @Failure 500 {object} fiber.Map{message=string}
-// @Router /api/v1/shop/inventory/stock-in [post]
 func HandleStockIn(c *fiber.Ctx) error {
-	db := database.GetDB()
-	ctx := context.Background()
-
 	claims, err := middleware.ExtractClaims(c)
 	if err != nil {
 		return err
 	}
-	userID := claims.UserID
-
-	var req models.StockInRequest
-	if err = c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
-	}
-	if req.ClientOperationID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
-	}
-
-	var assignedShopID string
-	userQuery := `SELECT assigned_shop_id FROM users WHERE id = $1`
-	if err := db.QueryRow(ctx, userQuery, userID).Scan(&assignedShopID); err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found for this user"})
-	}
-
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start transaction"})
-	}
-	defer tx.Rollback(ctx)
-
-	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "staff_stock_in", userID, &assignedShopID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start inventory operation"})
-	}
-	if !claimed {
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Stock-in already processed"})
-	}
-
-	for _, item := range req.Items {
-		// Get current quantity
-		var currentQuantity int
-		stockQuery := `SELECT quantity FROM shop_stock WHERE shop_id = $1 AND inventory_item_id = $2`
-		err := tx.QueryRow(ctx, stockQuery, assignedShopID, item.ProductID).Scan(&currentQuantity)
+	db, ctx := database.GetDB(), context.Background()
+	shopID := c.Query("shopId")
+	operationType := "merchant_stock_in"
+	merchantID := claims.UserID
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, claims.UserID)
 		if err != nil {
-			log.Printf("Error getting current stock for product %s: %v", item.ProductID, err)
-			continue
+			return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Assigned shop not found"})
 		}
-
-		newQuantity := currentQuantity + item.Quantity
-
-		// Update shop_stock
-		updateQuery := `UPDATE shop_stock SET quantity = $1, last_stocked_in_at = NOW() WHERE shop_id = $2 AND inventory_item_id = $3`
-		_, err = tx.Exec(ctx, updateQuery, newQuantity, assignedShopID, item.ProductID)
-		if err != nil {
-			log.Printf("Error updating stock for product %s: %v", item.ProductID, err)
-			continue
+		operationType = "staff_stock_in"
+		if err = db.QueryRow(ctx, `SELECT merchant_id FROM shops WHERE id=$1`, shopID).Scan(&merchantID); err != nil {
+			return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Shop not found"})
 		}
-
-		// Insert into stock_movements
-		movementQuery := `
-            INSERT INTO stock_movements (inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason)
-            VALUES ($1, $2, $3, 'stock_in', $4, $5, 'Stock received')
-        `
-		_, err = tx.Exec(ctx, movementQuery, item.ProductID, assignedShopID, userID, item.Quantity, newQuantity)
-		if err != nil {
-			log.Printf("Error inserting stock movement for product %s: %v", item.ProductID, err)
-			continue
-		}
+	} else if claims.Role != "merchant" {
+		return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Shop access denied"})
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to commit transaction"})
+	if shopID == "" {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "shopId is required"})
 	}
-
-	return c.JSON(fiber.Map{"status": "success", "message": "Stock updated successfully"})
+	if err = authorizeShopAccess(c, shopID); err != nil {
+		return err
+	}
+	return handleBulkStockIn(c, shopID, merchantID, operationType)
 }

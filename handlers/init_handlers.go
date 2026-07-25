@@ -5,6 +5,7 @@ import (
 	"app/models"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
@@ -22,17 +23,7 @@ func HandleInitializeAdmin(c *fiber.Ctx) error {
 	}
 
 	providedToken := c.Get("X-Init-Token")
-	// Log masked token attempts for debugging (do not log full token)
-	maskToken := func(t string) string {
-		if len(t) <= 8 {
-			return "****"
-		}
-		return t[:4] + "..." + t[len(t)-4:]
-	}
-	log.Printf("Init endpoint called. Provided token: %s", maskToken(providedToken))
-
 	if providedToken != initToken {
-		log.Printf("Init attempt with invalid token: %s", maskToken(providedToken))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Invalid initialization token",
@@ -53,9 +44,9 @@ func HandleInitializeAdmin(c *fiber.Ctx) error {
 			"message": "Invalid request body",
 		})
 	}
-
-	// Log who is being created (do NOT log password)
-	log.Printf("Init payload received. name=%s, email=%s", req.Name, req.Email)
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 255 || strings.TrimSpace(req.Email) == "" || len(req.Email) > 255 || len(req.Password) < 8 || len(req.Password) > 128 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Valid name, email, and password are required"})
+	}
 
 	// Check if a user with this email already exists (any role)
 	var existingCount int
@@ -70,14 +61,11 @@ func HandleInitializeAdmin(c *fiber.Ctx) error {
 	}
 
 	if existingCount > 0 {
-		log.Printf("Init aborted: user with email %s already exists", req.Email)
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"status":  "error",
 			"message": "User with this email already exists",
 		})
 	}
-
-	log.Printf("Email %s is unique. Proceeding to create admin.", req.Email)
 
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)

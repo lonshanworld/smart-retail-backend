@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"app/database"
-	"app/middleware"
 	"app/models"
 	"context"
 	"database/sql"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 )
 
 // HandleSearchCustomers searches for customers in a specific shop.
@@ -20,24 +20,39 @@ func HandleSearchCustomers(c *fiber.Ctx) error {
 	ctx := context.Background()
 	query := c.Query("query")
 	shopId := c.Query("shopId")
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
 
 	if shopId == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "shopId is required"})
+	}
+	if err := authorizeShopAccess(c, shopId); err != nil {
+		return err
 	}
 
 	var searchQuery string
 
 	customers := make([]models.ShopCustomer, 0)
+	var total int
 
 	// If query is empty, return all customers for the shop
 	if query == "" {
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM shop_customers WHERE shop_id=$1`, shopId).Scan(&total); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
 		searchQuery = `
 			SELECT id, shop_id, merchant_id, name, phone, email, created_at, updated_at
 			FROM shop_customers
 			WHERE shop_id = $1
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC LIMIT $2 OFFSET $3
 		`
-		rows, err := db.Query(ctx, searchQuery, shopId)
+		rows, err := db.Query(ctx, searchQuery, shopId, pageSize, (page-1)*pageSize)
 		if err != nil {
 			log.Printf("Error fetching customers: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -64,13 +79,16 @@ func HandleSearchCustomers(c *fiber.Ctx) error {
 		}
 	} else {
 		// If query is provided, search by name, email, or phone
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM shop_customers WHERE shop_id=$1 AND (name ILIKE $2 OR email ILIKE $2 OR phone ILIKE $2)`, shopId, "%"+query+"%").Scan(&total); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
 		searchQuery = `
 			SELECT id, shop_id, merchant_id, name, phone, email, created_at, updated_at
 			FROM shop_customers
 			WHERE shop_id = $1 AND (name ILIKE $2 OR email ILIKE $2 OR phone ILIKE $2)
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC LIMIT $3 OFFSET $4
 		`
-		rows, err := db.Query(ctx, searchQuery, shopId, "%"+query+"%")
+		rows, err := db.Query(ctx, searchQuery, shopId, "%"+query+"%", pageSize, (page-1)*pageSize)
 		if err != nil {
 			log.Printf("Error searching customers: %v", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -97,7 +115,7 @@ func HandleSearchCustomers(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{"success": true, "data": customers})
+	return c.JSON(fiber.Map{"success": true, "data": customers, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }
 
 // HandleCreateCustomer creates a new customer, ensuring no duplicates for the same shop, phone, and email.
@@ -110,14 +128,15 @@ func HandleCreateCustomer(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
 	}
 
-	claims, err := middleware.ExtractClaims(c)
-	if err != nil {
-		return err
-	}
-	merchantId := claims.UserID
-
 	if req.ShopID == "" || req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Shop ID and name are required"})
+	}
+	if err := authorizeShopAccess(c, req.ShopID); err != nil {
+		return err
+	}
+	var merchantId string
+	if err := db.QueryRow(ctx, `SELECT merchant_id FROM shops WHERE id=$1`, req.ShopID).Scan(&merchantId); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "message": "Shop not found"})
 	}
 	if strings.TrimSpace(req.ClientOperationID) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
@@ -139,7 +158,7 @@ func HandleCreateCustomer(c *fiber.Ctx) error {
 	var existingID string
 	checkQuery := "SELECT id FROM shop_customers WHERE shop_id = $1 AND phone = $2 AND email = $3"
 	err = tx.QueryRow(ctx, checkQuery, req.ShopID, req.Phone, req.Email).Scan(&existingID)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && err != pgx.ErrNoRows {
 		log.Printf("Error checking for existing customer: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
 	}
@@ -176,9 +195,17 @@ func HandleListCustomers(c *fiber.Ctx) error {
 	if shopID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "shopId is required"})
 	}
-
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	if err := authorizeShopAccess(c, shopID); err != nil {
+		return err
+	}
 	offset := (page - 1) * pageSize
 
 	// Count total items

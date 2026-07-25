@@ -26,6 +26,21 @@ type PromotionCreateRequest struct {
 	ClientOperationID string   `json:"clientOperationId"`
 }
 
+// normalizePromotionType converts the client-facing promotion type values to
+// the canonical values used by the database constraint.
+func normalizePromotionType(value string) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "PERCENTAGE":
+		return "PERCENTAGE", true
+	case "FIXED_AMOUNT", "FIXED", "AMOUNT":
+		return "FIXED_AMOUNT", true
+	case "BOGO":
+		return "BOGO", true
+	default:
+		return "", false
+	}
+}
+
 // HandleCreatePromotion creates a new promotion for the merchant.
 func HandleCreatePromotion(c *fiber.Ctx) error {
 	db := database.GetDB()
@@ -40,6 +55,11 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
 	var req PromotionCreateRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
+	}
+	if normalizedType, ok := normalizePromotionType(req.PromoType); ok {
+		req.PromoType = normalizedType
+	} else {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid promotion type"})
 	}
 	if strings.TrimSpace(req.ClientOperationID) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
@@ -84,12 +104,16 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
 
 	// Link products to the promotion
 	if len(req.ProductIDs) > 0 {
-		stmt, err := tx.Prepare(ctx, "insert_promo_product", "INSERT INTO promotion_products (promotion_id, inventory_item_id) VALUES ($1, $2)")
+		stmt, err := tx.Prepare(ctx, "insert_promo_product", "INSERT INTO promotion_products (merchant_id, promotion_id, product_id) VALUES ($1, $2, $3)")
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to prepare product link statement"})
 		}
 		for _, productID := range req.ProductIDs {
-			if _, err := tx.Exec(ctx, stmt.Name, promotionID, productID); err != nil {
+			var productOwned bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM products WHERE id=$1 AND merchant_id=$2)`, productID, merchantID).Scan(&productOwned); err != nil || !productOwned {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Promotion product does not belong to this merchant"})
+			}
+			if _, err := tx.Exec(ctx, stmt.Name, merchantID, promotionID, productID); err != nil {
 				log.Printf("Error linking product %s to promotion: %v", productID, err)
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to link product to promotion"})
 			}
@@ -108,7 +132,7 @@ func HandleCreatePromotion(c *fiber.Ctx) error {
 		FROM promotions
 		WHERE id = $1
 	`
-	err = tx.QueryRow(ctx, fetchQuery, promotionID).Scan(
+	err = db.QueryRow(ctx, fetchQuery, promotionID).Scan(
 		&promotion.ID, &promotion.MerchantID, &promotion.ShopID, &promotion.Name,
 		&promotion.Description, &promotion.PromoType, &promotion.PromoValue, &promotion.MinSpend,
 		&promotion.StartDate, &promotion.EndDate, &promotion.IsActive,
@@ -136,16 +160,46 @@ func HandleListPromotions(c *fiber.Ctx) error {
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
-
+	where := " WHERE merchant_id = $1"
+	args := []interface{}{merchantID}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += " AND (name ILIKE $2 OR description ILIKE $2)"
+		args = append(args, "%"+search+"%")
+	}
+	if shopID := strings.TrimSpace(c.Query("shopId")); shopID != "" {
+		where += " AND shop_id = $" + strconv.Itoa(len(args)+1)
+		args = append(args, shopID)
+	}
+	if promoType := strings.TrimSpace(c.Query("type")); promoType != "" {
+		normalizedType, ok := normalizePromotionType(promoType)
+		if !ok {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid promotion type"})
+		}
+		where += " AND promo_type = $" + strconv.Itoa(len(args)+1)
+		args = append(args, normalizedType)
+	}
+	if active := c.Query("isActive"); active != "" {
+		if value, parseErr := strconv.ParseBool(active); parseErr == nil {
+			where += " AND is_active = $" + strconv.Itoa(len(args)+1)
+			args = append(args, value)
+		}
+	}
 	query := `
         SELECT id, name, description, promo_type, promo_value, start_date, end_date, shop_id, is_active, created_at, updated_at
         FROM promotions
-        WHERE merchant_id = $1
+        ` + where + `
         ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2) + `
     `
-	rows, err := db.Query(ctx, query, merchantID, pageSize, offset)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to retrieve promotions"})
 	}
@@ -163,8 +217,9 @@ func HandleListPromotions(c *fiber.Ctx) error {
 
 	// Get total count for pagination
 	var totalItems int
-	countQuery := "SELECT COUNT(*) FROM promotions WHERE merchant_id = $1"
-	if err := db.QueryRow(ctx, countQuery, merchantID).Scan(&totalItems); err != nil {
+	countQuery := "SELECT COUNT(*) FROM promotions" + where
+	countArgs := args[:len(args)-2]
+	if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalItems); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to count promotions"})
 	}
 
@@ -255,6 +310,11 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
 	}
+	if normalizedType, ok := normalizePromotionType(req.PromoType); ok {
+		req.PromoType = normalizedType
+	} else {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid promotion type"})
+	}
 	if strings.TrimSpace(req.ClientOperationID) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "clientOperationId is required"})
 	}
@@ -290,12 +350,12 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 
 	// Add new product links
 	if len(req.ProductIDs) > 0 {
-		stmt, err := tx.Prepare(ctx, "update_promo_product", "INSERT INTO promotion_products (promotion_id, inventory_item_id) VALUES ($1, $2)")
+		stmt, err := tx.Prepare(ctx, "update_promo_product", "INSERT INTO promotion_products (merchant_id, promotion_id, product_id) VALUES ($1, $2, $3)")
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to prepare product link statement"})
 		}
 		for _, productID := range req.ProductIDs {
-			if _, err := tx.Exec(ctx, stmt.Name, promotionID, productID); err != nil {
+			if _, err := tx.Exec(ctx, stmt.Name, merchantID, promotionID, productID); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Failed to link product to promotion"})
 			}
 		}
@@ -313,7 +373,7 @@ func HandleUpdatePromotion(c *fiber.Ctx) error {
 		FROM promotions
 		WHERE id = $1
 	`
-	err = tx.QueryRow(ctx, fetchQuery, promotionID).Scan(
+	err = db.QueryRow(ctx, fetchQuery, promotionID).Scan(
 		&promotion.ID, &promotion.MerchantID, &promotion.ShopID, &promotion.Name,
 		&promotion.Description, &promotion.PromoType, &promotion.PromoValue, &promotion.MinSpend,
 		&promotion.StartDate, &promotion.EndDate, &promotion.IsActive,

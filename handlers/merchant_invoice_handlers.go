@@ -6,7 +6,9 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -24,39 +26,44 @@ func HandleListInvoices(c *fiber.Ctx) error {
 	merchantID := claims.UserID
 	page := c.QueryInt("page", 1)
 	pageSize := c.QueryInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
 
-	// Optional filter by shop
-	shopID := c.Query("shopId")
-
-	var query string
-	var args []interface{}
-
-	if shopID != "" {
-		query = `
-			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-				   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
-				   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
-			FROM invoices i
-			JOIN shops s ON s.id = i.shop_id
-			WHERE i.merchant_id = $1 AND i.shop_id = $2
-			ORDER BY i.invoice_date DESC
-			LIMIT $3 OFFSET $4
-		`
-		args = []interface{}{merchantID, shopID, pageSize, offset}
-	} else {
-		query = `
-			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
-				   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
-				   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
-			FROM invoices i
-			JOIN shops s ON s.id = i.shop_id
-			WHERE i.merchant_id = $1
-			ORDER BY i.invoice_date DESC
-			LIMIT $2 OFFSET $3
-		`
-		args = []interface{}{merchantID, pageSize, offset}
+	where := " WHERE i.merchant_id = $1"
+	args := []interface{}{merchantID}
+	if shopID := strings.TrimSpace(c.Query("shopId")); shopID != "" {
+		where += fmt.Sprintf(" AND i.shop_id = $%d", len(args)+1)
+		args = append(args, shopID)
 	}
+	if status := strings.TrimSpace(c.Query("paymentStatus")); status != "" {
+		where += fmt.Sprintf(" AND i.payment_status = $%d", len(args)+1)
+		args = append(args, status)
+	}
+	if from := strings.TrimSpace(c.Query("from")); from != "" {
+		where += fmt.Sprintf(" AND i.invoice_date >= $%d", len(args)+1)
+		args = append(args, from)
+	}
+	if to := strings.TrimSpace(c.Query("to")); to != "" {
+		where += fmt.Sprintf(" AND i.invoice_date < ($%d::date + INTERVAL '1 day')", len(args)+1)
+		args = append(args, to)
+	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += fmt.Sprintf(" AND (i.invoice_number ILIKE $%d OR COALESCE(i.notes,'') ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	query := `
+			SELECT i.id, i.sale_id, i.invoice_number, i.merchant_id, i.shop_id, s.name AS shop_name, i.invoice_date AS checkout_time, i.customer_id,
+				   i.invoice_date, i.due_date, i.subtotal, i.discount_amount, i.tax_amount, i.delivery_charge,
+				   i.total_amount, i.payment_status, i.notes, i.created_at, i.updated_at
+			FROM invoices i
+			JOIN shops s ON s.id = i.shop_id
+			` + where + fmt.Sprintf(" ORDER BY i.invoice_date DESC, i.id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, pageSize, offset)
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
@@ -86,14 +93,13 @@ func HandleListInvoices(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 		itemRows, err := db.Query(ctx, itemsQuery, invoice.SaleID)
 		if err != nil {
 			log.Printf("Error querying sale items for invoice %s: %v", invoice.ID, err)
 		} else {
-			defer itemRows.Close()
 			var items []models.SaleItem
 			for itemRows.Next() {
 				var si models.SaleItem
@@ -111,6 +117,7 @@ func HandleListInvoices(c *fiber.Ctx) error {
 				}
 				items = append(items, si)
 			}
+			itemRows.Close()
 			invoice.Items = items
 		}
 
@@ -119,16 +126,8 @@ func HandleListInvoices(c *fiber.Ctx) error {
 
 	// Count total invoices
 	var totalItems int
-	var countQuery string
-	var countArgs []interface{}
-
-	if shopID != "" {
-		countQuery = "SELECT COUNT(*) FROM invoices WHERE merchant_id = $1 AND shop_id = $2"
-		countArgs = []interface{}{merchantID, shopID}
-	} else {
-		countQuery = "SELECT COUNT(*) FROM invoices WHERE merchant_id = $1"
-		countArgs = []interface{}{merchantID}
-	}
+	countQuery := "SELECT COUNT(*) FROM invoices i" + where
+	countArgs := args[:len(args)-2]
 
 	if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting invoices: %v", err)
@@ -189,7 +188,7 @@ func HandleGetInvoiceByID(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 	rows, err := db.Query(ctx, itemsQuery, invoice.SaleID)
@@ -261,7 +260,7 @@ func HandleGetInvoiceBySaleID(c *fiber.Ctx) error {
 				   COALESCE(si.item_name, ii.name) as item_name,
 				   COALESCE(si.item_sku, ii.sku) as item_sku
 			FROM sale_items si
-			LEFT JOIN inventory_items ii ON si.inventory_item_id = ii.id
+			LEFT JOIN stock_items ii ON si.stock_item_id = ii.id
 			WHERE si.sale_id = $1
 		`
 	rows, err := db.Query(ctx, itemsQuery, invoice.SaleID)

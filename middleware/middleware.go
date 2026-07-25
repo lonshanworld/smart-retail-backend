@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -35,20 +36,9 @@ func CreateToken(userID string, role string) (string, error) {
 
 // JWTMiddleware validates the JWT token provided in the Authorization header
 func JWTMiddleware(c *fiber.Ctx) error {
-	// Skip JWT check for login and init endpoints
-	path := c.Path()
-	if path == "/api/auth/login" || path == "/api/init" {
-		return c.Next()
-	}
-
-	// Log headers for debugging
-	log.Printf("Request Headers: %v", c.GetReqHeaders())
-
 	authHeader := c.Get("Authorization")
-	log.Printf("Authorization Header: %s", authHeader)
 
 	if authHeader == "" {
-		log.Println("No Authorization header found")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Missing authorization token",
@@ -57,7 +47,6 @@ func JWTMiddleware(c *fiber.Ctx) error {
 
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 	if tokenString == authHeader {
-		log.Printf("Invalid auth header format: %s", authHeader)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Invalid authorization format",
@@ -66,7 +55,7 @@ func JWTMiddleware(c *fiber.Ctx) error {
 
 	claims := &models.JwtClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if token.Method == nil || token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			log.Printf("Unexpected signing method: %v", token.Header["alg"])
 			return nil, jwt.ErrSignatureInvalid
 		}
@@ -74,8 +63,7 @@ func JWTMiddleware(c *fiber.Ctx) error {
 	})
 
 	if err != nil {
-		log.Printf("Token parsing error: %v", err)
-		if err == jwt.ErrTokenExpired {
+		if errors.Is(err, jwt.ErrTokenExpired) {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"status":  "error",
 				"message": "Token has expired",
@@ -88,14 +76,12 @@ func JWTMiddleware(c *fiber.Ctx) error {
 	}
 
 	if !token.Valid {
-		log.Printf("Token is invalid")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Invalid token",
 		})
 	}
 
-	log.Printf("Token is valid. UserID: %s, Role: %s", claims.UserID, claims.Role)
 	c.Locals("user", token)
 	c.Locals("userID", claims.UserID)
 	c.Locals("userRole", claims.Role)
@@ -106,10 +92,7 @@ func JWTMiddleware(c *fiber.Ctx) error {
 // AdminRequired checks if the authenticated user has admin role
 func AdminRequired(c *fiber.Ctx) error {
 	role, ok := c.Locals("userRole").(string)
-	log.Printf("Checking admin role. Got role: %s, ok: %v", role, ok)
-
 	if !ok || role != "admin" {
-		log.Printf("Admin access denied for role: %s", role)
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Admin access required",
@@ -121,10 +104,7 @@ func AdminRequired(c *fiber.Ctx) error {
 // MerchantRequired checks if the authenticated user has merchant role
 func MerchantRequired(c *fiber.Ctx) error {
 	role, ok := c.Locals("userRole").(string)
-	log.Printf("Checking merchant role. Got role: %s, ok: %v", role, ok)
-
 	if !ok || role != "merchant" {
-		log.Printf("Merchant access denied for role: %s", role)
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Merchant access required",
@@ -136,10 +116,7 @@ func MerchantRequired(c *fiber.Ctx) error {
 // StaffRequired checks if the authenticated user has staff role
 func StaffRequired(c *fiber.Ctx) error {
 	role, ok := c.Locals("userRole").(string)
-	log.Printf("Checking staff role. Got role: %s, ok: %v", role, ok)
-
 	if !ok || role != "staff" {
-		log.Printf("Staff access denied for role: %s", role)
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"status":  "error",
 			"message": "Staff access required",
@@ -150,7 +127,10 @@ func StaffRequired(c *fiber.Ctx) error {
 
 // ExtractClaims extracts the JWT claims from the context
 func ExtractClaims(c *fiber.Ctx) (*models.JwtClaims, error) {
-	user := c.Locals("user").(*jwt.Token)
+	user, ok := c.Locals("user").(*jwt.Token)
+	if !ok || user == nil {
+		return nil, fiber.NewError(fiber.StatusUnauthorized, "Missing authenticated user")
+	}
 	claims, ok := user.Claims.(*models.JwtClaims)
 	if !ok {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "Invalid token claims")

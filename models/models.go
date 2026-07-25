@@ -360,10 +360,11 @@ type ProductSummary struct {
 
 // MerchantDashboardSummary defines the structure for the merchant dashboard summary.
 type MerchantDashboardSummary struct {
-	TotalSalesRevenue    KpiData          `json:"totalSalesRevenue"`
-	NumberOfTransactions KpiData          `json:"numberOfTransactions"`
-	AverageOrderValue    KpiData          `json:"averageOrderValue"`
-	TopSellingProducts   []ProductSummary `json:"topSellingProducts"`
+	TotalSalesRevenue            KpiData          `json:"totalSalesRevenue"`
+	NumberOfTransactions         KpiData          `json:"numberOfTransactions"`
+	AverageOrderValue            KpiData          `json:"averageOrderValue"`
+	TopSellingProducts           []ProductSummary `json:"topSellingProducts"`
+	TopSellingProductsPagination Pagination       `json:"topSellingProductsPagination"`
 }
 
 // CombinedStockItem represents a flattened view of an inventory item in a specific shop.
@@ -544,11 +545,13 @@ type CheckoutItem struct {
 // CheckoutRequest is the full request body for the checkout endpoint.
 type CheckoutRequest struct {
 	ShopID                string         `json:"shopId"`
+	POSSessionID          *string        `json:"posSessionId,omitempty"`
 	ID                    string         `json:"id,omitempty"`
 	ClientSaleID          string         `json:"clientSaleId,omitempty"`
 	Items                 []CheckoutItem `json:"items"`
 	TotalAmount           float64        `json:"totalAmount"`
 	DiscountAmount        float64        `json:"discountAmount"`
+	TaxAmount             float64        `json:"taxAmount"`
 	DeliveryCharge        float64        `json:"deliveryCharge"`
 	AppliedPromotionID    *string        `json:"appliedPromotionId,omitempty"`
 	PaymentType           string         `json:"paymentType"`

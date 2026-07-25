@@ -5,9 +5,11 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -38,13 +40,30 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 	ctx := context.Background()
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	limit, _ := strconv.Atoi(c.Query("pageSize", c.Query("limit", "20")))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
+	search := strings.TrimSpace(c.Query("search"))
+	where := " WHERE u.role = 'staff'"
+	args := []interface{}{}
+	if search != "" {
+		where += " AND (u.name ILIKE $1 OR u.email ILIKE $1)"
+		args = append(args, "%"+search+"%")
+	}
+	if merchantID := c.Query("merchantId"); merchantID != "" {
+		where += " AND u.merchant_id = $" + strconv.Itoa(len(args)+1)
+		args = append(args, merchantID)
+	}
 
 	// Get total count
 	var totalItems int
-	countQuery := "SELECT COUNT(*) FROM users WHERE role = 'staff'"
-	if err := db.QueryRow(ctx, countQuery).Scan(&totalItems); err != nil {
+	countQuery := "SELECT COUNT(*) FROM users u" + where
+	if err := db.QueryRow(ctx, countQuery, args...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count staff"})
 	}
@@ -55,11 +74,13 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 			   m.id as merchant_id, m.name as merchant_name
 		FROM users u
 		LEFT JOIN users m ON u.merchant_id = m.id
-		WHERE u.role = 'staff'
-		ORDER BY u.created_at DESC
-		LIMIT $1 OFFSET $2
+		%s
+		ORDER BY u.created_at DESC, u.id DESC
+		LIMIT $%d OFFSET $%d
 	`
-	rows, err := db.Query(ctx, query, limit, offset)
+	query = fmt.Sprintf(query, where, len(args)+1, len(args)+2)
+	args = append(args, limit, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error fetching staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve staff"})
@@ -86,19 +107,9 @@ func HandleGetAllStaff(c *fiber.Ctx) error {
 			continue
 		}
 
-		// Log the raw data we get from database
-		log.Printf("Raw staff data - ID: %s, Name: %s, Email: %s, Role: %s, IsActive: %v",
-			staffMember.ID, staffMember.Name, staffMember.Email, staffMember.Role, staffMember.IsActive)
-		log.Printf("Raw merchant data - MerchantID: %v (valid: %v), MerchantName: %v (valid: %v)",
-			merchantID.String, merchantID.Valid, merchantName.String, merchantName.Valid)
-
 		if merchantID.Valid && merchantName.Valid {
 			staffMember.MerchantID = merchantID.String
 			staffMember.MerchantName = merchantName.String
-			log.Printf("Setting merchant info for staff %s - MerchantID: %s, MerchantName: %s",
-				staffMember.Name, staffMember.MerchantID, staffMember.MerchantName)
-		} else {
-			log.Printf("No valid merchant info found for staff %s", staffMember.Name)
 		}
 
 		staff = append(staff, staffMember)

@@ -6,7 +6,9 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,24 +26,50 @@ func HandleDashboardListSales(c *fiber.Ctx) error {
 	userID := claims.UserID
 
 	// Resolve the assigned shop id for the user (works for staff)
-	shopID, err := getShopIDFromStaffID(ctx, db, userID)
-	if err != nil || shopID == "" {
-		log.Printf("Could not resolve assigned shop for user %s: %v", userID, err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Could not determine assigned shop for this user"})
+	shopID := c.Query("shopId")
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, userID)
+	} else if claims.Role != "merchant" {
+		return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Shop access denied"})
 	}
-
+	if shopID == "" {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "shopId is required"})
+	}
+	if err := authorizeShopAccess(c, shopID); err != nil {
+		return err
+	}
 	page := c.QueryInt("page", 1)
 	pageSize := c.QueryInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
 
+	where := " WHERE shop_id = $1"
+	args := []interface{}{shopID}
+	if from := strings.TrimSpace(c.Query("from")); from != "" {
+		where += fmt.Sprintf(" AND sale_date >= $%d", len(args)+1)
+		args = append(args, from)
+	}
+	if to := strings.TrimSpace(c.Query("to")); to != "" {
+		where += fmt.Sprintf(" AND sale_date < ($%d::date + INTERVAL '1 day')", len(args)+1)
+		args = append(args, to)
+	}
+	if status := strings.TrimSpace(c.Query("paymentStatus")); status != "" {
+		where += fmt.Sprintf(" AND payment_status = $%d", len(args)+1)
+		args = append(args, status)
+	}
 	query := `
 	SELECT id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, delivery_charge, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at
-        FROM sales
-        WHERE shop_id = $1
-        LIMIT $2 OFFSET $3
+	        FROM sales
+		` + where + fmt.Sprintf(" ORDER BY sale_date DESC, id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2) + `
     `
 
-	rows, err := db.Query(ctx, query, shopID, pageSize, offset)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error listing dashboard sales for shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve sales"})
@@ -79,8 +107,8 @@ func HandleDashboardListSales(c *fiber.Ctx) error {
 	}
 
 	var totalItems int
-	countQuery := "SELECT COUNT(*) FROM sales WHERE shop_id = $1"
-	if err := db.QueryRow(ctx, countQuery, shopID).Scan(&totalItems); err != nil {
+	countArgs := args[:len(args)-2]
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales"+where, countArgs...).Scan(&totalItems); err != nil {
 		log.Printf("Error counting dashboard sales: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count sales"})
 	}
@@ -108,21 +136,54 @@ func HandleDashboardGetItems(c *fiber.Ctx) error {
 		return err
 	}
 	userID := claims.UserID
-
-	shopID, err := getShopIDFromStaffID(ctx, db, userID)
-	if err != nil || shopID == "" {
-		log.Printf("Could not resolve assigned shop for user %s: %v", userID, err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Could not determine assigned shop for this user"})
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
 	}
 
+	shopID := c.Query("shopId")
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, userID)
+	} else if claims.Role != "merchant" {
+		return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Shop access denied"})
+	}
+	if shopID == "" {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "shopId is required"})
+	}
+	if err := authorizeShopAccess(c, shopID); err != nil {
+		return err
+	}
+
+	where := " WHERE ii.shop_id = $1"
+	args := []interface{}{shopID}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += fmt.Sprintf(" AND (si.name ILIKE $%d OR COALESCE(si.sku,'') ILIKE $%d)", len(args)+1, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	if categoryID := strings.TrimSpace(c.Query("categoryId")); categoryID != "" {
+		where += fmt.Sprintf(" AND EXISTS(SELECT 1 FROM product_categories pc WHERE pc.product_id=si.product_id AND pc.category_id=$%d)", len(args)+1)
+		args = append(args, categoryID)
+	}
+	if brandID := strings.TrimSpace(c.Query("brandId")); brandID != "" {
+		where += fmt.Sprintf(" AND p.brand_id=$%d", len(args)+1)
+		args = append(args, brandID)
+	}
 	query := `
-        SELECT ss.inventory_item_id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price, ss.quantity, ss.shop_id, ii.created_at, ii.updated_at
-        FROM shop_stock ss
-        JOIN inventory_items ii ON ss.inventory_item_id = ii.id
-        WHERE ss.shop_id = $1
-		ORDER BY ii.created_at DESC, ii.id DESC
-    `
-	rows, err := db.Query(ctx, query, shopID)
+        SELECT si.id, ii.merchant_id, si.name, si.sku, COALESCE(pp.selling_price,0), COALESCE(pp.cost_price,0), ii.quantity_on_hand, ii.shop_id, si.created_at, si.updated_at
+		FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN products p ON p.id=si.product_id
+        LEFT JOIN LATERAL(SELECT selling_price,cost_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE
+		` + where + fmt.Sprintf(" ORDER BY si.created_at DESC, si.id DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2) + `
+	`
+	var total int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN products p ON p.id=si.product_id`+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count shop inventory"})
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error querying dashboard shop items for shop %s: %v", shopID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shop inventory."})
@@ -152,7 +213,7 @@ func HandleDashboardGetItems(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": items})
+	return c.JSON(fiber.Map{"status": "success", "data": items, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }
 
 // HandleDashboardSearchCustomers searches customers for the authenticated user's assigned shop.
@@ -168,66 +229,60 @@ func HandleDashboardSearchCustomers(c *fiber.Ctx) error {
 	}
 	userID := claims.UserID
 
-	shopID, err := getShopIDFromStaffID(ctx, db, userID)
-	if err != nil || shopID == "" {
-		log.Printf("Could not resolve assigned shop for user %s: %v", userID, err)
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Could not determine assigned shop for this user"})
+	shopID := c.Query("shopId")
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, userID)
+	} else if claims.Role != "merchant" {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Shop access denied"})
+	}
+	if shopID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "shopId is required"})
+	}
+	if err := authorizeShopAccess(c, shopID); err != nil {
+		return err
 	}
 
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	where := " WHERE shop_id=$1"
+	args := []interface{}{shopID}
+	if queryText != "" {
+		where += " AND (name ILIKE $2 OR email ILIKE $2 OR phone ILIKE $2)"
+		args = append(args, "%"+queryText+"%")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shop_customers"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+	}
+	query := fmt.Sprintf("SELECT id, shop_id, merchant_id, name, phone, email, created_at, updated_at FROM shop_customers%s ORDER BY created_at DESC LIMIT $%d OFFSET $%d", where, len(args)+1, len(args)+2)
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := db.Query(ctx, query, args...)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+	}
+	defer rows.Close()
 	customers := make([]models.ShopCustomer, 0)
-	if queryText == "" {
-		searchQuery := `SELECT id, shop_id, merchant_id, name, phone, email, created_at, updated_at FROM shop_customers WHERE shop_id = $1 ORDER BY created_at DESC`
-		rows, err := db.Query(ctx, searchQuery, shopID)
-		if err != nil {
-			log.Printf("Error fetching dashboard customers: %v", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
+	for rows.Next() {
+		var customer models.ShopCustomer
+		var phone, email sql.NullString
+		if err := rows.Scan(&customer.ID, &customer.ShopID, &customer.MerchantID, &customer.Name, &phone, &email, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
+			continue
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var customer models.ShopCustomer
-			var phone, email sql.NullString
-			if err := rows.Scan(&customer.ID, &customer.ShopID, &customer.MerchantID, &customer.Name, &phone, &email, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
-				log.Printf("Error scanning customer row: %v", err)
-				continue
-			}
-			if phone.Valid {
-				p := phone.String
-				customer.Phone = &p
-			}
-			if email.Valid {
-				e := email.String
-				customer.Email = &e
-			}
-			customers = append(customers, customer)
+		if phone.Valid {
+			customer.Phone = &phone.String
 		}
-	} else {
-		searchQuery := `SELECT id, shop_id, merchant_id, name, phone, email, created_at, updated_at FROM shop_customers WHERE shop_id = $1 AND (name ILIKE $2 OR email ILIKE $2 OR phone ILIKE $2) ORDER BY created_at DESC`
-		rows, err := db.Query(ctx, searchQuery, shopID, "%"+queryText+"%")
-		if err != nil {
-			log.Printf("Error searching dashboard customers: %v", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Database error"})
+		if email.Valid {
+			customer.Email = &email.String
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var customer models.ShopCustomer
-			var phone, email sql.NullString
-			if err := rows.Scan(&customer.ID, &customer.ShopID, &customer.MerchantID, &customer.Name, &phone, &email, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
-				log.Printf("Error scanning customer row: %v", err)
-				continue
-			}
-			if phone.Valid {
-				p := phone.String
-				customer.Phone = &p
-			}
-			if email.Valid {
-				e := email.String
-				customer.Email = &e
-			}
-			customers = append(customers, customer)
-		}
+		customers = append(customers, customer)
 	}
-
-	return c.JSON(fiber.Map{"success": true, "data": customers})
+	return c.JSON(fiber.Map{"success": true, "data": customers, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }
 
 // HandleGetShopDashboardSummary retrieves a summary for the shop dashboard.
@@ -301,9 +356,8 @@ func HandleGetShopDashboardSummary(c *fiber.Ctx) error {
 	var lowStockItems int
 	lowStockQuery := `
 		SELECT count(*)
-		FROM shop_stock ss
-		JOIN inventory_items ii ON ss.inventory_item_id = ii.id
-		WHERE ss.shop_id = $1 AND ii.low_stock_threshold IS NOT NULL AND ss.quantity <= ii.low_stock_threshold
+		FROM inventory_items ii
+		WHERE ii.shop_id = $1 AND ii.low_stock_threshold IS NOT NULL AND ii.quantity_on_hand <= ii.low_stock_threshold
 	`
 	if err := db.QueryRow(ctx, lowStockQuery, shopID).Scan(&lowStockItems); err != nil {
 		log.Printf("Error getting low stock items count: %v", err)

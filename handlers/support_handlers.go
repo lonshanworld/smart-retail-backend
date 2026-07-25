@@ -5,6 +5,7 @@ import (
 	"app/middleware"
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -145,15 +146,24 @@ func normalizeStatus(status string) (string, bool) {
 	}
 }
 
-func fetchSupportMessages(ctx context.Context, ticketID string) ([]supportMessageDTO, error) {
+func fetchSupportMessages(ctx context.Context, ticketID string, page, pageSize int) ([]supportMessageDTO, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 100
+	}
 	db := database.GetDB()
 	rows, err := db.Query(
 		ctx,
 		`SELECT id, ticket_id, sender_role, content, is_admin_reply, created_at
 		 FROM support_messages
 		 WHERE ticket_id = $1
-			 ORDER BY created_at DESC`,
+			 ORDER BY created_at DESC
+			 LIMIT $2 OFFSET $3`,
 		ticketID,
+		pageSize,
+		(page-1)*pageSize,
 	)
 	if err != nil {
 		return nil, err
@@ -180,7 +190,14 @@ func HandleListShopSupportTickets(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 	status := strings.TrimSpace(c.Query("status"))
-
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
 	query := `
 		SELECT id, merchant_id, shop_id, subject, status, priority, customer_name, customer_email, customer_phone, created_at, updated_at
 		FROM support_tickets
@@ -195,7 +212,17 @@ func HandleListShopSupportTickets(c *fiber.Ctx) error {
 		query += " AND status = $3"
 		args = append(args, normalized)
 	}
-	query += " ORDER BY updated_at DESC"
+	var total int
+	countQuery := "SELECT COUNT(*) FROM support_tickets WHERE merchant_id=$1 AND shop_id=$2"
+	countArgs := []interface{}{merchantID, shopID}
+	if status != "" {
+		countQuery += " AND status=$3"
+		countArgs = append(countArgs, args[len(args)-1])
+	}
+	if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count support tickets"})
+	}
+	query += fmt.Sprintf(" ORDER BY updated_at DESC LIMIT %d OFFSET %d", pageSize, (page-1)*pageSize)
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
@@ -232,15 +259,13 @@ func HandleListShopSupportTickets(c *fiber.Ctx) error {
 			ticket.CustomerPhone = &customerPhone.String
 		}
 
-		messages, err := fetchSupportMessages(ctx, ticket.ID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to load ticket messages"})
-		}
-		ticket.Messages = messages
+		// Messages are loaded by the detail endpoint to avoid an N+1 query
+		// pattern when listing many tickets.
+		ticket.Messages = make([]supportMessageDTO, 0)
 		tickets = append(tickets, ticket)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": tickets})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": tickets, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }
 
 func HandleCreateShopSupportTicket(c *fiber.Ctx) error {
@@ -260,7 +285,7 @@ func HandleCreateShopSupportTicket(c *fiber.Ctx) error {
 	if req.ClientOperationID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "clientOperationId is required"})
 	}
-	if req.Subject == "" || req.Message == "" {
+	if req.Subject == "" || req.Message == "" || len(req.Subject) > 255 || len(req.Message) > 10000 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "subject and message are required"})
 	}
 
@@ -281,7 +306,7 @@ func HandleCreateShopSupportTicket(c *fiber.Ctx) error {
 
 	var ticket supportTicketDTO
 	var customerName, customerEmail, customerPhone sql.NullString
-	err = db.QueryRow(
+	err = tx.QueryRow(
 		ctx,
 		`INSERT INTO support_tickets (merchant_id, shop_id, subject, status, priority, customer_name, customer_email, customer_phone)
 		 VALUES ($1, $2, $3, 'OPEN', $4, $5, $6, $7)
@@ -320,7 +345,7 @@ func HandleCreateShopSupportTicket(c *fiber.Ctx) error {
 	}
 
 	var message supportMessageDTO
-	err = db.QueryRow(
+	err = tx.QueryRow(
 		ctx,
 		`INSERT INTO support_messages (ticket_id, sender_role, content, is_admin_reply)
 		 VALUES ($1, $2, $3, $4)
@@ -395,7 +420,9 @@ func HandleGetShopSupportTicketByID(c *fiber.Ctx) error {
 		ticket.CustomerPhone = &customerPhone.String
 	}
 
-	messages, err := fetchSupportMessages(ctx, ticket.ID)
+	messagePage := c.QueryInt("messagePage", 1)
+	messagePageSize := c.QueryInt("messagePageSize", 100)
+	messages, err := fetchSupportMessages(ctx, ticket.ID, messagePage, messagePageSize)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to load ticket messages"})
 	}
@@ -420,7 +447,8 @@ func HandleReplyShopSupportTicket(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "Invalid request body"})
 	}
 	req.Content = strings.TrimSpace(req.Content)
-	if req.Content == "" {
+	req.ClientOperationID = strings.TrimSpace(req.ClientOperationID)
+	if req.Content == "" || len(req.Content) > 10000 || req.ClientOperationID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "content is required"})
 	}
 
@@ -450,7 +478,14 @@ func HandleReplyShopSupportTicket(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
-	err = db.QueryRow(
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "support_ticket_reply", merchantID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "message": "Operation already processed"})
+	}
+	err = tx.QueryRow(
 		ctx,
 		`INSERT INTO support_messages (ticket_id, sender_role, content, is_admin_reply)
 		 VALUES ($1, $2, $3, $4)
@@ -464,7 +499,7 @@ func HandleReplyShopSupportTicket(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to add reply"})
 	}
 
-	_, _ = db.Exec(
+	_, _ = tx.Exec(
 		ctx,
 		"UPDATE support_tickets SET updated_at = NOW() WHERE id = $1",
 		ticketID,
@@ -497,6 +532,10 @@ func HandleUpdateShopSupportTicketStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "Invalid status"})
 	}
 	priority := normalizePriority(req.Priority)
+	req.ClientOperationID = strings.TrimSpace(req.ClientOperationID)
+	if req.ClientOperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": "clientOperationId is required"})
+	}
 
 	db := database.GetDB()
 	ctx := context.Background()
@@ -508,7 +547,14 @@ func HandleUpdateShopSupportTicketStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to start transaction"})
 	}
 	defer tx.Rollback(ctx)
-	err = db.QueryRow(
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "support_ticket_status", merchantID, &shopID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to start operation"})
+	}
+	if !claimed {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "message": "Operation already processed"})
+	}
+	err = tx.QueryRow(
 		ctx,
 		`UPDATE support_tickets
 		 SET status = $1, priority = $2, updated_at = NOW()
@@ -548,12 +594,14 @@ func HandleUpdateShopSupportTicketStatus(c *fiber.Ctx) error {
 	if customerPhone.Valid {
 		ticket.CustomerPhone = &customerPhone.String
 	}
-	messages, err := fetchSupportMessages(ctx, ticket.ID)
-	if err == nil {
-		ticket.Messages = messages
-	}
+	messagePage := c.QueryInt("messagePage", 1)
+	messagePageSize := c.QueryInt("messagePageSize", 100)
 	if err := tx.Commit(ctx); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to commit transaction"})
+	}
+	messages, err := fetchSupportMessages(ctx, ticket.ID, messagePage, messagePageSize)
+	if err == nil {
+		ticket.Messages = messages
 	}
 
 	return c.JSON(fiber.Map{"status": "success", "success": true, "data": ticket})

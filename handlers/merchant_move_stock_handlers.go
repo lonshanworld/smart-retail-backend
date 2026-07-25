@@ -5,13 +5,10 @@ import (
 	"app/middleware"
 	"context"
 	"fmt"
-	"log"
-
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v4"
 )
 
-// MoveStockRequest defines the request body for moving stock between shops
 type MoveStockRequest struct {
 	ClientOperationID string `json:"clientOperationId"`
 	ItemID            string `json:"itemId"`
@@ -20,233 +17,78 @@ type MoveStockRequest struct {
 	Quantity          int    `json:"quantity"`
 }
 
-// HandleMoveStock moves stock of an item from one shop to another
 func HandleMoveStock(c *fiber.Ctx) error {
-	db := database.GetDB()
-	ctx := context.Background()
-
 	claims, err := middleware.ExtractClaims(c)
 	if err != nil {
 		return err
 	}
-	merchantID := claims.UserID
-	userID := claims.UserID
-
 	var req MoveStockRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Invalid request body",
-		})
+	if err = c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "Invalid request body"})
 	}
-
-	// Validate request
-	if req.ItemID == "" || req.FromShopID == "" || req.ToShopID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "itemId, fromShopId, and toShopId are required",
-		})
+	if req.ClientOperationID == "" || req.ItemID == "" || req.FromShopID == "" || req.ToShopID == "" || req.Quantity <= 0 {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "clientOperationId, itemId, both shops, and a positive quantity are required"})
 	}
-
-	if req.Quantity <= 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Quantity must be greater than 0",
-		})
-	}
-
-	if req.ClientOperationID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "clientOperationId is required",
-		})
-	}
-
-	if req.FromShopID == req.ToShopID {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Source and destination shops must be different",
-		})
-	}
-
-	// Start transaction
+	db, ctx := database.GetDB(), context.Background()
 	tx, err := db.Begin(ctx)
 	if err != nil {
-		log.Printf("Failed to begin transaction: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to start transaction",
-		})
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to start transfer"})
 	}
 	defer tx.Rollback(ctx)
-
-	// Verify both shops belong to the merchant
-	var fromShopMerchantID, toShopMerchantID string
-	err = tx.QueryRow(ctx, "SELECT merchant_id FROM shops WHERE id = $1", req.FromShopID).Scan(&fromShopMerchantID)
+	var fromOwner, toOwner string
+	if err = tx.QueryRow(ctx, `SELECT merchant_id FROM shops WHERE id=$1`, req.FromShopID).Scan(&fromOwner); err != nil {
+		return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Source shop not found"})
+	}
+	if err = tx.QueryRow(ctx, `SELECT merchant_id FROM shops WHERE id=$1`, req.ToShopID).Scan(&toOwner); err != nil {
+		return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Destination shop not found"})
+	}
+	if fromOwner != claims.UserID || toOwner != claims.UserID {
+		return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Shop access denied"})
+	}
+	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_move_stock", claims.UserID, &req.FromShopID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"status":  "error",
-				"message": "Source shop not found",
-			})
-		}
-		log.Printf("Error checking source shop: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Database error",
-		})
-	}
-
-	err = tx.QueryRow(ctx, "SELECT merchant_id FROM shops WHERE id = $1", req.ToShopID).Scan(&toShopMerchantID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"status":  "error",
-				"message": "Destination shop not found",
-			})
-		}
-		log.Printf("Error checking destination shop: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Database error",
-		})
-	}
-
-	// Verify ownership
-	if fromShopMerchantID != merchantID || toShopMerchantID != merchantID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"status":  "error",
-			"message": "You don't have permission to move stock between these shops",
-		})
-	}
-
-	// Verify the item belongs to the merchant
-	var itemMerchantID string
-	err = tx.QueryRow(ctx, "SELECT merchant_id FROM inventory_items WHERE id = $1", req.ItemID).Scan(&itemMerchantID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"status":  "error",
-				"message": "Inventory item not found",
-			})
-		}
-		log.Printf("Error checking inventory item: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Database error",
-		})
-	}
-
-	if itemMerchantID != merchantID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"status":  "error",
-			"message": "You don't have permission to move this item",
-		})
-	}
-
-	claimed, err := claimInventoryOperation(ctx, tx, req.ClientOperationID, "merchant_move_stock", merchantID, &req.FromShopID)
-	if err != nil {
-		log.Printf("Failed to reserve inventory operation %s: %v", req.ClientOperationID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to start inventory operation",
-		})
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to start transfer"})
 	}
 	if !claimed {
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"status":  "success",
-			"message": "Stock move already processed",
-		})
+		return c.JSON(fiber.Map{"status": "success", "message": "Stock transfer already processed"})
 	}
-
-	// Decrement stock from source shop
-	var newFromQuantity int
-	err = tx.QueryRow(ctx,
-		`UPDATE shop_stock 
-		 SET quantity = quantity - $1 
-		 WHERE shop_id = $2 AND inventory_item_id = $3 AND quantity >= $1
-		 RETURNING quantity`,
-		req.Quantity, req.FromShopID, req.ItemID,
-	).Scan(&newFromQuantity)
-
+	var productID string
+	if err = tx.QueryRow(ctx, `SELECT product_id FROM stock_items WHERE id=$1 AND merchant_id=$2`, req.ItemID, claims.UserID).Scan(&productID); err != nil {
+		return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Stock item not found"})
+	}
+	var fromID string
+	var fromQty float64
+	if err = tx.QueryRow(ctx, `SELECT id,quantity_on_hand FROM inventory_items WHERE shop_id=$1 AND stock_item_id=$2 FOR UPDATE`, req.FromShopID, req.ItemID).Scan(&fromID, &fromQty); err != nil {
+		return c.Status(404).JSON(fiber.Map{"status": "error", "message": "Item is not stocked in source shop"})
+	}
+	if fromQty < float64(req.Quantity) {
+		return c.Status(409).JSON(fiber.Map{"status": "error", "message": "Insufficient stock in source shop"})
+	}
+	newFrom := fromQty - float64(req.Quantity)
+	if _, err = tx.Exec(ctx, `UPDATE inventory_items SET quantity_on_hand=$1,updated_at=NOW() WHERE id=$2`, newFrom, fromID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to update source stock"})
+	}
+	var toID string
+	var newTo float64
+	if err = tx.QueryRow(ctx, `SELECT id,quantity_on_hand FROM inventory_items WHERE shop_id=$1 AND stock_item_id=$2 FOR UPDATE`, req.ToShopID, req.ItemID).Scan(&toID, &newTo); err == pgx.ErrNoRows {
+		err = tx.QueryRow(ctx, `INSERT INTO inventory_items(merchant_id,shop_id,product_id,stock_item_id,quantity_on_hand) VALUES($1,$2,$3,$4,$5) RETURNING id,quantity_on_hand`, claims.UserID, req.ToShopID, productID, req.ItemID, req.Quantity).Scan(&toID, &newTo)
+	} else if err == nil {
+		newTo += float64(req.Quantity)
+		_, err = tx.Exec(ctx, `UPDATE inventory_items SET quantity_on_hand=$1,updated_at=NOW() WHERE id=$2`, newTo, toID)
+	}
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"status":  "error",
-				"message": "Insufficient stock in source shop",
-			})
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to update destination stock"})
+	}
+	for _, v := range []struct {
+		shop, inv, typ string
+		qty            float64
+	}{{req.FromShopID, fromID, "OUT", float64(req.Quantity)}, {req.ToShopID, toID, "IN", float64(req.Quantity)}} {
+		if _, err = tx.Exec(ctx, `INSERT INTO inventory_movements(merchant_id,shop_id,inventory_item_id,product_id,stock_item_id,movement_type,quantity,base_quantity,reference_type,reference_id,event_key,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$7,'TRANSFER',NULL,$8,$9)`, claims.UserID, v.shop, v.inv, productID, req.ItemID, v.typ, v.qty, fmt.Sprintf("%s:%s", req.ClientOperationID, v.shop), fmt.Sprintf("Transfer between shops: %s -> %s", req.FromShopID, req.ToShopID)); err != nil {
+			return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to record stock transfer"})
 		}
-		log.Printf("Error decrementing stock from source shop: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to update source shop stock",
-		})
 	}
-
-	// Record stock movement for source shop (outgoing)
-	_, err = tx.Exec(ctx,
-		`INSERT INTO stock_movements (inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason)
-		 VALUES ($1, $2, $3, 'transfer_out', $4, $5, $6)`,
-		req.ItemID, req.FromShopID, userID, -req.Quantity, newFromQuantity,
-		fmt.Sprintf("Transferred %d units to another shop", req.Quantity),
-	)
-	if err != nil {
-		log.Printf("Error recording source shop movement: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to record stock movement",
-		})
+	if err = tx.Commit(ctx); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to commit transfer"})
 	}
-
-	// Increment stock in destination shop (or create if doesn't exist)
-	var newToQuantity int
-	err = tx.QueryRow(ctx,
-		`INSERT INTO shop_stock (shop_id, inventory_item_id, quantity, last_stocked_in_at)
-		 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-		 ON CONFLICT (shop_id, inventory_item_id) 
-		 DO UPDATE SET quantity = shop_stock.quantity + $3, last_stocked_in_at = CURRENT_TIMESTAMP
-		 RETURNING quantity`,
-		req.ToShopID, req.ItemID, req.Quantity,
-	).Scan(&newToQuantity)
-
-	if err != nil {
-		log.Printf("Error incrementing stock in destination shop: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to update destination shop stock",
-		})
-	}
-
-	// Record stock movement for destination shop (incoming)
-	_, err = tx.Exec(ctx,
-		`INSERT INTO stock_movements (inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason)
-		 VALUES ($1, $2, $3, 'transfer_in', $4, $5, $6)`,
-		req.ItemID, req.ToShopID, userID, req.Quantity, newToQuantity,
-		fmt.Sprintf("Received %d units from another shop", req.Quantity),
-	)
-	if err != nil {
-		log.Printf("Error recording destination shop movement: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to record stock movement",
-		})
-	}
-
-	// Commit transaction
-	if err := tx.Commit(ctx); err != nil {
-		log.Printf("Failed to commit transaction: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to complete stock transfer",
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"status":  "success",
-		"message": "Stock moved successfully",
-		"data": fiber.Map{
-			"fromShopNewQuantity": newFromQuantity,
-			"toShopNewQuantity":   newToQuantity,
-		},
-	})
+	return c.JSON(fiber.Map{"status": "success", "message": "Stock moved successfully", "data": fiber.Map{"fromShopNewQuantity": newFrom, "toShopNewQuantity": newTo}})
 }

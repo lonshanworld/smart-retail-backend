@@ -16,58 +16,100 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 )
 
+func resolveShopPOSScope(c *fiber.Ctx, db *pgxpool.Pool, requestedShopID string) (string, string, error) {
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return "", "", err
+	}
+	ctx := context.Background()
+	shopID := requestedShopID
+	if claims.Role == "staff" {
+		shopID, err = getShopIDFromStaffID(ctx, db, claims.UserID)
+		if err != nil {
+			return "", "", fiber.NewError(404, "Assigned shop not found")
+		}
+	} else if claims.Role == "merchant" {
+		if shopID == "" {
+			shopID = c.Query("shopId")
+		}
+		if shopID == "" {
+			return "", "", fiber.NewError(400, "shopId is required")
+		}
+		var owner string
+		if err = db.QueryRow(ctx, `SELECT merchant_id FROM shops WHERE id=$1`, shopID).Scan(&owner); err != nil {
+			return "", "", fiber.NewError(404, "Shop not found")
+		}
+		if owner != claims.UserID {
+			return "", "", fiber.NewError(403, "Shop access denied")
+		}
+	} else {
+		return "", "", fiber.NewError(403, "Shop access denied")
+	}
+	merchantID, err := getMerchantIDFromShopID(ctx, db, shopID)
+	if err != nil {
+		return "", "", fiber.NewError(404, "Shop not found")
+	}
+	return shopID, merchantID, nil
+}
+
 // HandleSearchShopProducts searches for products in the current shop's inventory.
 func HandleSearchShopProducts(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	claims, err := middleware.ExtractClaims(c)
-	if err != nil {
-		return err
-	}
-	staffID := claims.UserID
 	searchTerm := c.Query("searchTerm")
 
 	// optional filters
 	categoryId := c.Query("categoryId")
 	subcategoryId := c.Query("subcategoryId")
 	brandId := c.Query("brandId")
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
 
-	shopID, err := getShopIDFromStaffID(ctx, db, staffID)
+	shopID, _, err := resolveShopPOSScope(c, db, c.Params("shopId"))
 	if err != nil {
-		log.Printf("Error finding shop for staff ID %s: %v", staffID, err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Could not find an assigned shop for this staff member."})
+		return err
 	}
 
 	baseQuery := `
-		SELECT ii.id, ii.merchant_id, ii.name, ii.sku, ii.selling_price, ii.original_price,
-			   ss.quantity, ss.shop_id, ii.created_at, ii.updated_at
-		FROM inventory_items ii
-		JOIN shop_stock ss ON ii.id = ss.inventory_item_id
-		WHERE ss.shop_id = $1
-		  AND (ii.name ILIKE $2 OR ii.sku ILIKE $2)
-		  AND ii.is_archived = FALSE
+		SELECT si.id, ii.merchant_id, si.name, si.sku, COALESCE(pp.selling_price,0), COALESCE(pp.cost_price,0),
+			   ii.quantity_on_hand, ii.shop_id, si.created_at, si.updated_at
+		FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN products p ON p.id=si.product_id
+		LEFT JOIN LATERAL(SELECT selling_price,cost_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE
+		WHERE ii.shop_id = $1 AND ii.quantity_on_hand > 0 AND p.is_active=TRUE
+		  AND (si.name ILIKE $2 OR si.sku ILIKE $2)
 	`
 
 	args := []interface{}{shopID, "%" + searchTerm + "%"}
 	argPos := 3
 	if categoryId != "" {
-		baseQuery += fmt.Sprintf(" AND ii.category_id = $%d", argPos)
+		baseQuery += fmt.Sprintf(" AND EXISTS(SELECT 1 FROM product_categories pc WHERE pc.product_id=si.product_id AND pc.category_id = $%d)", argPos)
 		args = append(args, categoryId)
 		argPos++
 	}
 	if subcategoryId != "" {
-		baseQuery += fmt.Sprintf(" AND ii.subcategory_id = $%d", argPos)
+		baseQuery += fmt.Sprintf(" AND EXISTS(SELECT 1 FROM product_categories pc2 WHERE pc2.product_id=si.product_id AND pc2.category_id=$%d)", argPos)
 		args = append(args, subcategoryId)
 		argPos++
 	}
 	if brandId != "" {
-		baseQuery += fmt.Sprintf(" AND ii.brand_id = $%d", argPos)
+		baseQuery += fmt.Sprintf(" AND p.brand_id = $%d", argPos)
 		args = append(args, brandId)
 		argPos++
 	}
+	countQuery := "SELECT COUNT(*) " + baseQuery[strings.Index(baseQuery, "FROM"):]
+	var total int
+	if err := db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count shop products"})
+	}
 
-	finalQuery := baseQuery + "\n        ORDER BY ii.created_at DESC, ii.id DESC\n        LIMIT 50\n    "
+	finalQuery := baseQuery + fmt.Sprintf("\n        ORDER BY ii.created_at DESC, ii.id DESC\n        LIMIT %d OFFSET %d\n    ", pageSize, (page-1)*pageSize)
 
 	rows, err := db.Query(ctx, finalQuery, args...)
 	if err != nil {
@@ -76,7 +118,7 @@ func HandleSearchShopProducts(c *fiber.Ctx) error {
 	}
 	defer rows.Close()
 
-	var items []models.InventoryItem
+	items := make([]models.InventoryItem, 0)
 	for rows.Next() {
 		var item models.InventoryItem
 		var stock models.ShopStock
@@ -92,7 +134,7 @@ func HandleSearchShopProducts(c *fiber.Ctx) error {
 		items = append(items, item)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": items, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize, "hasNext": page*pageSize < total}})
 }
 
 // HandleShopCheckout processes a new sale transaction from a shop terminal.
@@ -114,32 +156,31 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 	if clientSaleID == "" {
 		clientSaleID = strings.TrimSpace(req.ID)
 	}
+	if len(req.Items) == 0 || len(req.Items) > 100 || req.TotalAmount < 0 || req.DiscountAmount < 0 || req.DeliveryCharge < 0 || req.DiscountAmount > req.TotalAmount {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "Invalid sale totals or item count"})
+	}
+	var calculatedTotal float64
+	seenProducts := make(map[string]struct{}, len(req.Items))
+	for _, item := range req.Items {
+		if strings.TrimSpace(item.ProductID) == "" || item.Quantity <= 0 || item.SellingPriceAtSale < 0 {
+			return c.Status(400).JSON(fiber.Map{"status": "error", "message": "Invalid sale item"})
+		}
+		if _, exists := seenProducts[item.ProductID]; exists {
+			return c.Status(400).JSON(fiber.Map{"status": "error", "message": "Duplicate product lines are not allowed"})
+		}
+		seenProducts[item.ProductID] = struct{}{}
+		calculatedTotal += float64(item.Quantity) * item.SellingPriceAtSale
+	}
+	if calculatedTotal-req.DiscountAmount+req.DeliveryCharge < req.TotalAmount-0.01 || calculatedTotal-req.DiscountAmount+req.DeliveryCharge > req.TotalAmount+0.01 {
+		return c.Status(400).JSON(fiber.Map{"status": "error", "message": "Sale total does not match item totals"})
+	}
 	if clientSaleID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientSaleId is required"})
 	}
 
-	shopID, err := getShopIDFromStaffID(ctx, db, staffID)
+	shopID, merchantID, err := resolveShopPOSScope(c, db, c.Params("shopId"))
 	if err != nil {
-		log.Printf("Error finding shop for staff ID %s: %v", staffID, err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Could not find an assigned shop for this staff member."})
-	}
-
-	merchantID, err := getMerchantIDFromShopID(ctx, db, shopID)
-	if err != nil {
-		log.Printf("Error finding merchant for shop ID %s: %v", shopID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Internal server error."})
-	}
-
-	// If customer name is provided but no customer ID, create a new customer
-	if req.CustomerName != nil && *req.CustomerName != "" && req.CustomerID == nil {
-		customerID, err := createCustomerFromName(ctx, db, shopID, merchantID, *req.CustomerName)
-		if err != nil {
-			log.Printf("Warning: Failed to create customer from name '%s': %v", *req.CustomerName, err)
-			// Don't fail the checkout, just log the warning and continue without customer
-		} else {
-			req.CustomerID = &customerID
-			log.Printf("Created new customer %s for name '%s'", customerID, *req.CustomerName)
-		}
+		return err
 	}
 
 	tx, err := db.Begin(ctx)
@@ -152,11 +193,24 @@ func HandleShopCheckout(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to start operation"})
 	}
 	if !claimed {
-		sale, err := getFullSaleDetails(ctx, db, clientSaleID)
-		if err == nil {
-			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
+		if existing, lookupErr := getSaleByClientSaleID(ctx, db, clientSaleID, merchantID); lookupErr == nil {
+			if sale, detailErr := getFullSaleDetails(ctx, db, existing.ID); detailErr == nil {
+				return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "success": true, "data": sale})
+			}
 		}
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
+	if req.CustomerID != nil && *req.CustomerID != "" {
+		var valid bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shop_customers WHERE id=$1 AND shop_id=$2 AND merchant_id=$3)`, *req.CustomerID, shopID, merchantID).Scan(&valid); err != nil || !valid {
+			return c.Status(403).JSON(fiber.Map{"status": "error", "message": "Customer does not belong to this shop"})
+		}
+	}
+	if req.CustomerName != nil && strings.TrimSpace(*req.CustomerName) != "" && req.CustomerID == nil {
+		var customerID string
+		if err = tx.QueryRow(ctx, `INSERT INTO shop_customers(merchant_id,shop_id,name) VALUES($1,$2,$3) RETURNING id`, merchantID, shopID, strings.TrimSpace(*req.CustomerName)).Scan(&customerID); err == nil {
+			req.CustomerID = &customerID
+		}
 	}
 
 	saleID, err := createSaleRecord(ctx, tx, shopID, merchantID, staffID, clientSaleID, req)
@@ -228,41 +282,38 @@ func getMerchantIDFromShopID(ctx context.Context, db *pgxpool.Pool, shopID strin
 
 func createSaleRecord(ctx context.Context, tx pgx.Tx, shopID, merchantID, staffID, clientSaleID string, req models.CheckoutRequest) (string, error) {
 	var saleID string
+	serverSaleID := generateUUID()
 	query := `
 	INSERT INTO sales (id, client_sale_id, shop_id, merchant_id, staff_id, total_amount, discount_amount, applied_promotion_id, delivery_charge, payment_type, customer_id, sale_date)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id
     `
-	err := tx.QueryRow(ctx, query, clientSaleID, clientSaleID, shopID, merchantID, staffID, req.TotalAmount, req.DiscountAmount, req.AppliedPromotionID, req.DeliveryCharge, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
+	err := tx.QueryRow(ctx, query, serverSaleID, clientSaleID, shopID, merchantID, staffID, req.TotalAmount, req.DiscountAmount, req.AppliedPromotionID, req.DeliveryCharge, req.PaymentType, req.CustomerID, time.Now()).Scan(&saleID)
 	return saleID, err
 }
 
 func processSaleItem(ctx context.Context, tx pgx.Tx, saleID, shopID, staffID string, item models.CheckoutItem) error {
 	var current models.InventoryItem
-	lockQuery := "SELECT name, sku, original_price FROM inventory_items WHERE id = $1 FOR UPDATE"
-	err := tx.QueryRow(ctx, lockQuery, item.ProductID).Scan(&current.Name, &current.SKU, &current.OriginalPrice)
+	var inventoryID, productID, merchantID string
+	lockQuery := `SELECT ii.id,si.product_id,s.name,si.sku,pp.cost_price,s.merchant_id FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN shops s ON s.id=ii.shop_id LEFT JOIN LATERAL(SELECT cost_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE WHERE ii.shop_id=$1 AND ii.stock_item_id=$2 FOR UPDATE OF ii,si,s`
+	err := tx.QueryRow(ctx, lockQuery, shopID, item.ProductID).Scan(&inventoryID, &productID, &current.Name, &current.SKU, &current.OriginalPrice, &merchantID)
 	if err != nil {
 		return fmt.Errorf("could not find or lock inventory item %s: %w", item.ProductID, err)
 	}
 
 	saleItemQuery := `
-        INSERT INTO sale_items (sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO sale_items (sale_id, inventory_item_id, product_id, stock_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     `
 	subtotal := float64(item.Quantity) * item.SellingPriceAtSale
-	_, err = tx.Exec(ctx, saleItemQuery, saleID, item.ProductID, current.Name, current.SKU, item.Quantity, item.SellingPriceAtSale, current.OriginalPrice, subtotal)
+	_, err = tx.Exec(ctx, saleItemQuery, saleID, inventoryID, productID, item.ProductID, current.Name, current.SKU, item.Quantity, item.SellingPriceAtSale, current.OriginalPrice, subtotal)
 	if err != nil {
 		return fmt.Errorf("could not create sale item record for %s: %w", item.ProductID, err)
 	}
 
-	stockUpdateQuery := `
-		UPDATE shop_stock
-		SET quantity = quantity - $1
-		WHERE shop_id = $2 AND inventory_item_id = $3 AND quantity >= $1
-		RETURNING quantity
-	`
-	var newQuantity int
-	err = tx.QueryRow(ctx, stockUpdateQuery, item.Quantity, shopID, item.ProductID).Scan(&newQuantity)
+	stockUpdateQuery := `UPDATE inventory_items SET quantity_on_hand=quantity_on_hand-$1,updated_at=NOW() WHERE id=$2 AND quantity_on_hand >= $1 RETURNING quantity_on_hand`
+	var newQuantity float64
+	err = tx.QueryRow(ctx, stockUpdateQuery, item.Quantity, inventoryID).Scan(&newQuantity)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return fmt.Errorf("insufficient stock for product %s", item.ProductID)
@@ -271,13 +322,13 @@ func processSaleItem(ctx context.Context, tx pgx.Tx, saleID, shopID, staffID str
 	}
 
 	movementQuery := `
-        INSERT INTO stock_movements (inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason)
-        VALUES ($1, $2, $3, 'sale', $4, $5, $6)
+        INSERT INTO inventory_movements (merchant_id,shop_id,inventory_item_id,product_id,stock_item_id,movement_type,quantity,base_quantity,reference_type,reference_id,event_key,notes)
+        VALUES ($1,$2,$3,$4,$5,'OUT',$6,$6,'SALE',$7,$8,$9)
     `
 	reason := fmt.Sprintf("Sale #%s", saleID)
-	_, err = tx.Exec(ctx, movementQuery, item.ProductID, shopID, staffID, -item.Quantity, newQuantity, reason)
+	_, err = tx.Exec(ctx, movementQuery, merchantID, shopID, inventoryID, productID, item.ProductID, item.Quantity, saleID, fmt.Sprintf("%s:%s", saleID, item.ProductID), reason)
 	if err != nil {
-		log.Printf("Warning: could not log stock movement for item %s in sale %s: %v", item.ProductID, saleID, err)
+		return fmt.Errorf("could not log stock movement for item %s in sale %s: %w", item.ProductID, saleID, err)
 	}
 
 	return nil
@@ -341,22 +392,19 @@ func HandleGetActivePromotionsForShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	claims, err := middleware.ExtractClaims(c)
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	search := strings.TrimSpace(c.Query("search"))
+
+	shopID, merchantID, err := resolveShopPOSScope(c, db, "")
 	if err != nil {
 		return err
-	}
-	staffID := claims.UserID
-
-	shopID, err := getShopIDFromStaffID(ctx, db, staffID)
-	if err != nil {
-		log.Printf("Error finding shop for staff ID %s: %v", staffID, err)
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Could not find an assigned shop for this staff member."})
-	}
-
-	merchantID, err := getMerchantIDFromShopID(ctx, db, shopID)
-	if err != nil {
-		log.Printf("Error finding merchant for shop ID %s: %v", shopID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Internal server error."})
 	}
 
 	query := `
@@ -368,10 +416,22 @@ func HandleGetActivePromotionsForShop(c *fiber.Ctx) error {
 		  AND is_active = TRUE
 		  AND (start_date IS NULL OR start_date <= NOW())
 		  AND (end_date IS NULL OR end_date >= NOW())
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC LIMIT $3 OFFSET $4
 	`
-
-	rows, err := db.Query(ctx, query, merchantID, shopID)
+	args := []interface{}{merchantID, shopID}
+	where := " AND (shop_id IS NULL OR shop_id = $2) AND is_active = TRUE AND (start_date IS NULL OR start_date <= NOW()) AND (end_date IS NULL OR end_date >= NOW())"
+	if search != "" {
+		where += " AND (name ILIKE $3 OR description ILIKE $3)"
+		args = append(args, "%"+search+"%")
+	}
+	countQuery := "SELECT COUNT(*) FROM promotions WHERE merchant_id=$1" + where
+	var total int
+	if err := db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to count promotions"})
+	}
+	query = "SELECT id, merchant_id, shop_id, name, description, promo_type, promo_value, min_spend, start_date, end_date, is_active, created_at, updated_at FROM promotions WHERE merchant_id=$1" + where + fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := db.Query(ctx, query, args...)
 
 	if err != nil {
 		log.Printf("Error fetching promotions: %v", err)
@@ -391,5 +451,5 @@ func HandleGetActivePromotionsForShop(c *fiber.Ctx) error {
 		promotions = append(promotions, promo)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": promotions})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": promotions, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize, "hasNext": page*pageSize < total}})
 }

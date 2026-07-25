@@ -16,7 +16,10 @@ func TestGenerateText(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/gemini/generate", nil)
 
-	resp, _ := app.Test(req, 1)
+	resp, err := app.Test(req, 1000)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 
 	assert.Equal(t, 200, resp.StatusCode)
 }

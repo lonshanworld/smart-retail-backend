@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -79,7 +80,7 @@ func providerModelName(provider aiProvider) string {
 	case aiProviderOpenAI:
 		return firstNonEmpty(os.Getenv("OPENAI_MODEL"), "gpt-4o-mini")
 	default:
-		return firstNonEmpty(os.Getenv("GEMINI_MODEL"), "gemini-2.5-flash-lite")
+		return firstNonEmpty(os.Getenv("GEMINI_MODEL"), "gemini-3.5-flash-lite")
 	}
 }
 
@@ -230,4 +231,11 @@ func stripHTMLTags(input string) string {
 	cleaned = strings.ReplaceAll(cleaned, "&lt;", "<")
 	cleaned = strings.ReplaceAll(cleaned, "&gt;", ">")
 	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+// escapeAIHTML prevents provider-controlled markup from becoming executable
+// when a client renders the response as HTML. Clients may render this value as
+// text or use the plain `analysis` field.
+func escapeAIHTML(input string) string {
+	return template.HTMLEscapeString(input)
 }

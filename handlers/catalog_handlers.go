@@ -6,7 +6,10 @@ import (
 	"app/models"
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -26,6 +29,50 @@ type catalogCreateRequest struct {
 type categoryWithChildren struct {
 	models.Category
 	Subcategories []models.Subcategory `json:"subcategories"`
+}
+
+func nullableString(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+// validateCatalogParent enforces same-merchant ownership and prevents cycles
+// when categories are moved in the unlimited hierarchy.
+func validateCatalogParent(ctx context.Context, q inventoryOperationQuerier, merchantID, parentID, movingID string) error {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil
+	}
+	var valid bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM categories WHERE id=$1 AND merchant_id=$2)`, parentID, merchantID).Scan(&valid); err != nil {
+		return err
+	}
+	if !valid {
+		return fmt.Errorf("parent category does not belong to merchant")
+	}
+	if movingID == "" {
+		return nil
+	}
+	if parentID == movingID {
+		return fmt.Errorf("category cannot be its own parent")
+	}
+	if err := q.QueryRow(ctx, `WITH RECURSIVE descendants AS (
+		SELECT id FROM categories WHERE id=$1 AND merchant_id=$2
+		UNION ALL
+		SELECT c.id FROM categories c JOIN descendants d ON c.parent_id=d.id WHERE c.merchant_id=$2
+	) SELECT EXISTS(SELECT 1 FROM descendants WHERE id=$3)`, movingID, merchantID, parentID).Scan(&valid); err != nil {
+		return err
+	}
+	if valid {
+		return fmt.Errorf("category hierarchy cycle detected")
+	}
+	return nil
+}
+
+func catalogSlug(name string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(name)), "-"))
 }
 
 func getMerchantIDFromClaims(c *fiber.Ctx) (string, error) {
@@ -65,20 +112,51 @@ func HandleGetMerchantCatalogOptions(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 100)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 100
+	}
+	categorySearch := strings.TrimSpace(c.Query("categorySearch"))
+	brandSearch := strings.TrimSpace(c.Query("brandSearch"))
+	categoryPattern, brandPattern := "", ""
+	if categorySearch != "" {
+		categoryPattern = "%" + categorySearch + "%"
+	}
+	if brandSearch != "" {
+		brandPattern = "%" + brandSearch + "%"
+	}
+	var totalCategories, totalBrands int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM categories WHERE merchant_id=$1 AND parent_id IS NULL AND ($2='' OR name ILIKE $2)`, merchantID, categoryPattern).Scan(&totalCategories); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to count categories"})
+	}
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM brands WHERE merchant_id=$1 AND ($2='' OR name ILIKE $2)`, merchantID, brandPattern).Scan(&totalBrands); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to count brands"})
+	}
 
 	categories := make([]categoryWithChildren, 0)
 	categoryByID := map[string]*categoryWithChildren{}
 
 	categoryQuery := `
 		SELECT c.id, c.merchant_id, c.name, c.description, c.created_at, c.updated_at,
-			sc.id, sc.name, sc.description, sc.created_at, sc.updated_at
+			child.id, child.name, child.description, child.created_at, child.updated_at
 		FROM categories c
-		LEFT JOIN subcategories sc ON c.id = sc.category_id
-		WHERE c.merchant_id = $1
-		ORDER BY c.name, sc.name
+		LEFT JOIN LATERAL (
+			SELECT id, name, description, created_at, updated_at
+			FROM categories
+			WHERE parent_id = c.id AND merchant_id = c.merchant_id
+			ORDER BY name
+			LIMIT 100
+		) child ON TRUE
+		WHERE c.merchant_id = $1 AND c.parent_id IS NULL AND ($2 = '' OR c.name ILIKE $2)
+		ORDER BY c.name, child.name
+		LIMIT $3 OFFSET $4
 	`
 
-	rows, err := db.Query(ctx, categoryQuery, merchantID)
+	rows, err := db.Query(ctx, categoryQuery, merchantID, categoryPattern, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to load categories"})
 	}
@@ -125,12 +203,12 @@ func HandleGetMerchantCatalogOptions(c *fiber.Ctx) error {
 
 	// Try to select image_url if the column exists; otherwise fall back to a query without it.
 	brands := make([]models.Brand, 0)
-	queryWithImg := `SELECT id, merchant_id, name, description, image_url, created_at, updated_at FROM brands WHERE merchant_id = $1 ORDER BY name`
-	brandRows, err := db.Query(ctx, queryWithImg, merchantID)
+	queryWithImg := `SELECT id, merchant_id, name, description, image_url, created_at, updated_at FROM brands WHERE merchant_id = $1 AND ($2 = '' OR name ILIKE $2) ORDER BY name LIMIT $3 OFFSET $4`
+	brandRows, err := db.Query(ctx, queryWithImg, merchantID, brandPattern, pageSize, (page-1)*pageSize)
 	if err != nil {
 		// if the DB doesn't have image_url column, retry without it
 		if strings.Contains(strings.ToLower(err.Error()), "image_url") {
-			brandRows, err = db.Query(ctx, `SELECT id, merchant_id, name, description, created_at, updated_at FROM brands WHERE merchant_id = $1 ORDER BY name`, merchantID)
+			brandRows, err = db.Query(ctx, `SELECT id, merchant_id, name, description, created_at, updated_at FROM brands WHERE merchant_id = $1 AND ($2 = '' OR name ILIKE $2) ORDER BY name LIMIT $3 OFFSET $4`, merchantID, brandPattern, pageSize, (page-1)*pageSize)
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to load brands"})
 			}
@@ -174,6 +252,10 @@ func HandleGetMerchantCatalogOptions(c *fiber.Ctx) error {
 		"data": fiber.Map{
 			"categories": categories,
 			"brands":     brands,
+			"pagination": fiber.Map{
+				"categories": fiber.Map{"totalItems": totalCategories, "totalPages": (totalCategories + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize},
+				"brands":     fiber.Map{"totalItems": totalBrands, "totalPages": (totalBrands + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize},
+			},
 		},
 	})
 }
@@ -373,7 +455,31 @@ func HandleDeleteAdminBrand(c *fiber.Ctx) error {
 func listCategoriesByMerchant(c *fiber.Ctx, merchantID string) error {
 	db := database.GetDB()
 	ctx := context.Background()
-	rows, err := db.Query(ctx, `SELECT id, merchant_id, name, description, created_at, updated_at FROM categories WHERE merchant_id = $1 ORDER BY name`, merchantID)
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	where := " WHERE merchant_id=$1"
+	args := []interface{}{merchantID}
+	if v := strings.TrimSpace(c.Query("parentId")); v != "" {
+		where += " AND parent_id=$2"
+		args = append(args, v)
+	}
+	if v := strings.TrimSpace(c.Query("search")); v != "" {
+		where += fmt.Sprintf(" AND name ILIKE $%d", len(args)+1)
+		args = append(args, "%"+v+"%")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM categories"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count categories"})
+	}
+	query := fmt.Sprintf(`SELECT id, merchant_id, name, description, created_at, updated_at FROM categories%s ORDER BY name LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	args = append(args, size, (page-1)*size)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to list categories"})
 	}
@@ -391,7 +497,7 @@ func listCategoriesByMerchant(c *fiber.Ctx, merchantID string) error {
 		}
 		categories = append(categories, cat)
 	}
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": categories})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": categories, "pagination": fiber.Map{"totalItems": total, "totalPages": int(math.Ceil(float64(total) / float64(size))), "currentPage": page, "pageSize": size}})
 }
 
 func createCategory(c *fiber.Ctx, merchantID string) error {
@@ -423,10 +529,14 @@ func createCategory(c *fiber.Ctx, merchantID string) error {
 	if !claimed {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "message": "Category already processed"})
 	}
+	if err := validateCatalogParent(ctx, tx, merchantID, req.CategoryID, ""); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": err.Error()})
+	}
 
 	var cat models.Category
 	var desc sql.NullString
-	err = tx.QueryRow(ctx, `INSERT INTO categories (merchant_id, name, description) VALUES ($1, $2, $3) RETURNING id, merchant_id, name, description, created_at, updated_at`, merchantID, req.Name, req.Description).Scan(&cat.ID, &cat.MerchantID, &cat.Name, &desc, &cat.CreatedAt, &cat.UpdatedAt)
+	parentID := nullableString(req.CategoryID)
+	err = tx.QueryRow(ctx, `INSERT INTO categories (merchant_id, parent_id, name, slug, description, path) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, merchant_id, name, description, created_at, updated_at`, merchantID, parentID, req.Name, catalogSlug(req.Name), req.Description, catalogSlug(req.Name)).Scan(&cat.ID, &cat.MerchantID, &cat.Name, &desc, &cat.CreatedAt, &cat.UpdatedAt)
 	if err != nil {
 		log.Printf("Error creating category: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to create category"})
@@ -470,9 +580,12 @@ func updateCategory(c *fiber.Ctx, categoryID, merchantID string) error {
 	if !claimed {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "success": true, "message": "Category already processed"})
 	}
+	if err := validateCatalogParent(ctx, tx, merchantID, req.CategoryID, categoryID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "success": false, "message": err.Error()})
+	}
 	var cat models.Category
 	var desc sql.NullString
-	err = tx.QueryRow(ctx, `UPDATE categories SET name = $1, description = $2, updated_at = NOW() WHERE id = $3 AND merchant_id = $4 RETURNING id, merchant_id, name, description, created_at, updated_at`, req.Name, req.Description, categoryID, merchantID).Scan(&cat.ID, &cat.MerchantID, &cat.Name, &desc, &cat.CreatedAt, &cat.UpdatedAt)
+	err = tx.QueryRow(ctx, `UPDATE categories SET name = $1, description = $2, parent_id = COALESCE($3, parent_id), updated_at = NOW() WHERE id = $4 AND merchant_id = $5 RETURNING id, merchant_id, name, description, created_at, updated_at`, req.Name, req.Description, nullableString(req.CategoryID), categoryID, merchantID).Scan(&cat.ID, &cat.MerchantID, &cat.Name, &desc, &cat.CreatedAt, &cat.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "success": false, "message": "Category not found"})
@@ -529,13 +642,37 @@ func deleteCategory(c *fiber.Ctx, categoryID, merchantID string) error {
 func listSubcategories(c *fiber.Ctx, merchantID, categoryID string) error {
 	db := database.GetDB()
 	ctx := context.Background()
-	query := `SELECT sc.id, sc.category_id, sc.name, sc.description, sc.created_at, sc.updated_at FROM subcategories sc JOIN categories c ON sc.category_id = c.id WHERE c.merchant_id = $1`
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	query := `SELECT sc.id, sc.parent_id, sc.name, sc.description, sc.created_at, sc.updated_at FROM categories sc WHERE sc.merchant_id = $1 AND sc.parent_id IS NOT NULL`
 	args := []interface{}{merchantID}
 	if categoryID != "" {
-		query += " AND sc.category_id = $2"
+		query += fmt.Sprintf(" AND sc.parent_id = $%d", len(args)+1)
 		args = append(args, categoryID)
 	}
-	query += " ORDER BY sc.name"
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		query += fmt.Sprintf(" AND sc.name ILIKE $%d", len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	var total int
+	countQuery := "SELECT COUNT(*) FROM categories sc WHERE sc.merchant_id=$1 AND sc.parent_id IS NOT NULL"
+	if categoryID != "" {
+		countQuery += " AND sc.parent_id=$2"
+	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		countQuery += fmt.Sprintf(" AND sc.name ILIKE $%d", len(args))
+	}
+	if err := db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count subcategories"})
+	}
+	query += fmt.Sprintf(" ORDER BY sc.name LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, size, (page-1)*size)
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to list subcategories"})
@@ -553,7 +690,7 @@ func listSubcategories(c *fiber.Ctx, merchantID, categoryID string) error {
 		}
 		subs = append(subs, s)
 	}
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": subs})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": subs, "pagination": fiber.Map{"totalItems": total, "totalPages": int(math.Ceil(float64(total) / float64(size))), "currentPage": page, "pageSize": size}})
 }
 
 func createSubcategory(c *fiber.Ctx, merchantID string) error {
@@ -585,6 +722,9 @@ func createSubcategory(c *fiber.Ctx, merchantID string) error {
 	if !claimed {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Subcategory already processed"})
 	}
+	if err := validateCatalogParent(ctx, tx, merchantID, req.CategoryID, ""); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": err.Error()})
+	}
 
 	var ownerCheck int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM categories WHERE id = $1 AND merchant_id = $2`, req.CategoryID, merchantID).Scan(&ownerCheck); err != nil || ownerCheck == 0 {
@@ -592,7 +732,7 @@ func createSubcategory(c *fiber.Ctx, merchantID string) error {
 	}
 	var sub models.Subcategory
 	var desc sql.NullString
-	err = tx.QueryRow(ctx, `INSERT INTO subcategories (category_id, name, description) VALUES ($1, $2, $3) RETURNING id, category_id, name, description, created_at, updated_at`, req.CategoryID, req.Name, req.Description).Scan(&sub.ID, &sub.CategoryID, &sub.Name, &desc, &sub.CreatedAt, &sub.UpdatedAt)
+	err = tx.QueryRow(ctx, `INSERT INTO categories (merchant_id, parent_id, name, slug, description, path) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, parent_id, name, description, created_at, updated_at`, merchantID, req.CategoryID, req.Name, catalogSlug(req.Name), req.Description, catalogSlug(req.Name)).Scan(&sub.ID, &sub.CategoryID, &sub.Name, &desc, &sub.CreatedAt, &sub.UpdatedAt)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to create subcategory"})
 	}
@@ -635,15 +775,17 @@ func updateSubcategory(c *fiber.Ctx, subcategoryID, merchantID string) error {
 	if !claimed {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Subcategory already processed"})
 	}
+	if err := validateCatalogParent(ctx, tx, merchantID, req.CategoryID, subcategoryID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": err.Error()})
+	}
 
 	var sub models.Subcategory
 	var desc sql.NullString
 	err = tx.QueryRow(ctx, `
-		UPDATE subcategories sc
-		SET category_id = $1, name = $2, description = $3, updated_at = NOW()
-		FROM categories c
-		WHERE sc.id = $4 AND c.id = sc.category_id AND c.merchant_id = $5
-		RETURNING sc.id, sc.category_id, sc.name, sc.description, sc.created_at, sc.updated_at
+		UPDATE categories sc
+		SET parent_id = $1, name = $2, description = $3, updated_at = NOW()
+		WHERE sc.id = $4 AND sc.merchant_id = $5 AND sc.parent_id IS NOT NULL
+		RETURNING sc.id, sc.parent_id, sc.name, sc.description, sc.created_at, sc.updated_at
 	`, req.CategoryID, req.Name, req.Description, subcategoryID, merchantID).Scan(&sub.ID, &sub.CategoryID, &sub.Name, &desc, &sub.CreatedAt, &sub.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -684,7 +826,7 @@ func deleteSubcategory(c *fiber.Ctx, subcategoryID, merchantID string) error {
 		return c.SendStatus(fiber.StatusNoContent)
 	}
 
-	res, err := tx.Exec(ctx, `DELETE FROM subcategories sc USING categories c WHERE sc.id = $1 AND c.id = sc.category_id AND c.merchant_id = $2`, subcategoryID, merchantID)
+	res, err := tx.Exec(ctx, `DELETE FROM categories WHERE id = $1 AND merchant_id = $2 AND parent_id IS NOT NULL`, subcategoryID, merchantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to delete subcategory"})
 	}
@@ -701,12 +843,34 @@ func deleteSubcategory(c *fiber.Ctx, subcategoryID, merchantID string) error {
 func listBrands(c *fiber.Ctx, merchantID string) error {
 	db := database.GetDB()
 	ctx := context.Background()
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	where := " WHERE merchant_id=$1"
+	args := []interface{}{merchantID}
+	if search != "" {
+		where += " AND name ILIKE $2"
+		args = append(args, "%"+search+"%")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM brands"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count brands"})
+	}
+	query := fmt.Sprintf(`SELECT id, merchant_id, name, description, image_url, created_at, updated_at FROM brands%s ORDER BY name LIMIT $%d OFFSET $%d`, where, len(args)+1, len(args)+2)
+	args = append(args, size, (page-1)*size)
 	// Try selecting image_url first; fall back if column missing in older schemas
 	brands := make([]models.Brand, 0)
-	rows, err := db.Query(ctx, `SELECT id, merchant_id, name, description, image_url, created_at, updated_at FROM brands WHERE merchant_id = $1 ORDER BY name`, merchantID)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "image_url") {
-			rows, err = db.Query(ctx, `SELECT id, merchant_id, name, description, created_at, updated_at FROM brands WHERE merchant_id = $1 ORDER BY name`, merchantID)
+			fallbackQuery := fmt.Sprintf(`SELECT id, merchant_id, name, description, created_at, updated_at FROM brands%s ORDER BY name LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args))
+			rows, err = db.Query(ctx, fallbackQuery, args...)
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to list brands"})
 			}
@@ -722,7 +886,7 @@ func listBrands(c *fiber.Ctx, merchantID string) error {
 				}
 				brands = append(brands, b)
 			}
-			return c.JSON(fiber.Map{"status": "success", "success": true, "data": brands})
+			return c.JSON(fiber.Map{"status": "success", "success": true, "data": brands, "pagination": fiber.Map{"totalItems": total, "totalPages": int(math.Ceil(float64(total) / float64(size))), "currentPage": page, "pageSize": size}})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "success": false, "message": "Failed to list brands"})
 	}
@@ -742,7 +906,7 @@ func listBrands(c *fiber.Ctx, merchantID string) error {
 		}
 		brands = append(brands, b)
 	}
-	return c.JSON(fiber.Map{"status": "success", "success": true, "data": brands})
+	return c.JSON(fiber.Map{"status": "success", "success": true, "data": brands, "pagination": fiber.Map{"totalItems": total, "totalPages": int(math.Ceil(float64(total) / float64(size))), "currentPage": page, "pageSize": size}})
 }
 
 func createBrand(c *fiber.Ctx, merchantID string) error {
@@ -778,7 +942,7 @@ func createBrand(c *fiber.Ctx, merchantID string) error {
 	var exists int
 	if err := tx.QueryRow(ctx, `SELECT 1 FROM brands WHERE merchant_id = $1 AND lower(name) = lower($2) LIMIT 1`, merchantID, req.Name).Scan(&exists); err == nil {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": "error", "success": false, "message": "Brand already exists"})
-	} else if err != nil && err != sql.ErrNoRows {
+	} else if err != nil && err != pgx.ErrNoRows {
 		log.Printf("Error checking existing brand: %v", err)
 		// fallthrough to attempt insert and let insert handle unexpected errors
 	}

@@ -5,10 +5,12 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
+	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 func HandleListMerchantShops(c *fiber.Ctx) error {
@@ -21,14 +23,37 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 	}
 	merchantID := claims.UserID
 
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	where := " WHERE s.merchant_id=$1"
+	args := []interface{}{merchantID}
+	if v := c.Query("search"); v != "" {
+		where += " AND (s.name ILIKE $2 OR s.address ILIKE $2 OR s.phone ILIKE $2)"
+		args = append(args, "%"+v+"%")
+	}
+	if v := c.Query("isActive"); v != "" {
+		where += fmt.Sprintf(" AND s.is_active=$%d", len(args)+1)
+		args = append(args, v == "true")
+	}
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shops s"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count shops"})
+	}
 	query := `
 		SELECT s.id, s.name, s.address, s.phone, s.tax_rate, s.is_active, s.is_primary,
-			   COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
+		       COALESCE(ps.delivery_charge, 0), s.created_at, s.updated_at
 		FROM shops s
 		LEFT JOIN payment_settings ps ON ps.shop_id = s.id
-		WHERE s.merchant_id = $1`
+		` + where + fmt.Sprintf(" ORDER BY s.created_at DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, size, (page-1)*size)
 
-	rows, err := db.Query(ctx, query, merchantID)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve shops"})
 	}
@@ -44,7 +69,7 @@ func HandleListMerchantShops(c *fiber.Ctx) error {
 		shops = append(shops, shop)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": shops})
+	return c.JSON(fiber.Map{"status": "success", "data": shops, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + size - 1) / size, "currentPage": page, "pageSize": size}})
 }
 
 // HandleUpdateMerchantShop updates a shop belonging to the authenticated merchant.
@@ -161,11 +186,21 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(*models.JwtClaims)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
 	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	size, _ := strconv.Atoi(c.Query("pageSize", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
 
 	// Verify the shop belongs to the merchant
 	var count int
@@ -173,28 +208,42 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 	if err := db.QueryRow(ctx, checkQuery, shopID, merchantID).Scan(&count); err != nil || count == 0 {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Shop not found or access denied"})
 	}
+	where := " WHERE ii.shop_id = $1"
+	args := []interface{}{shopID}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += " AND (si.name ILIKE $2 OR si.sku ILIKE $2)"
+		args = append(args, "%"+search+"%")
+	}
+	if categoryID := strings.TrimSpace(c.Query("categoryId")); categoryID != "" {
+		where += " AND EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id=si.product_id AND pc.category_id=$" + strconv.Itoa(len(args)+1) + ")"
+		args = append(args, categoryID)
+	}
+	if brandID := strings.TrimSpace(c.Query("brandId")); brandID != "" {
+		where += " AND p.brand_id=$" + strconv.Itoa(len(args)+1)
+		args = append(args, brandID)
+	}
+	if c.Query("lowStock") == "true" {
+		where += " AND ii.low_stock_threshold IS NOT NULL AND ii.quantity_on_hand <= ii.low_stock_threshold"
+	}
 
 	query := `
-        SELECT 
-            ii.id, 
-            ii.merchant_id, 
-            ii.name, 
-            ii.description, 
-            ii.sku, 
-            ii.selling_price, 
-            ii.original_price, 
-            ii.low_stock_threshold, 
-            ii.category, 
-            ii.supplier_id, 
-            ii.is_archived, 
-            ii.created_at, 
-            ii.updated_at, 
-            ss.quantity
-        FROM inventory_items ii
-        JOIN shop_stock ss ON ii.id = ss.inventory_item_id
-        WHERE ss.shop_id = $1
-    `
-	rows, err := db.Query(ctx, query, shopID)
+		SELECT ii.stock_item_id, ii.merchant_id, si.name, p.description, si.sku,
+			COALESCE(pp.selling_price,0), COALESCE(pp.cost_price,0), ii.low_stock_threshold,
+			NULL, NULL, NOT p.is_active, si.created_at, si.updated_at, ii.quantity_on_hand
+		FROM inventory_items ii
+		JOIN stock_items si ON si.id=ii.stock_item_id
+		JOIN products p ON p.id=si.product_id
+		LEFT JOIN LATERAL (SELECT selling_price,cost_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1) pp ON TRUE
+		` + where + `
+	`
+	query += " ORDER BY si.name"
+	var total int
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id JOIN products p ON p.id=si.product_id"+where, args...).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count products"})
+	}
+	query += " LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
+	args = append(args, size, (page-1)*size)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error fetching products for shop: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve products"})
@@ -240,7 +289,7 @@ func HandleListProductsForShop(c *fiber.Ctx) error {
 		products = append(products, p)
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": products})
+	return c.JSON(fiber.Map{"status": "success", "data": products, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + size - 1) / size, "currentPage": page, "pageSize": size}})
 }
 
 // HandleSetPrimaryShop sets a shop as the primary shop for the merchant.
@@ -248,9 +297,11 @@ func HandleSetPrimaryShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(jwt.MapClaims)
-	merchantID := claims["userId"].(string)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
+	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
 
@@ -310,8 +361,10 @@ func HandleCheckDeleteMerchantShop(c *fiber.Ctx) error {
 	db := database.GetDB()
 	ctx := context.Background()
 
-	user := c.Locals("user").(*jwt.Token)
-	claims := user.Claims.(*models.JwtClaims)
+	claims, err := middleware.ExtractClaims(c)
+	if err != nil {
+		return err
+	}
 	merchantID := claims.UserID
 
 	shopID := c.Params("shopId")
@@ -332,13 +385,13 @@ func HandleCheckDeleteMerchantShop(c *fiber.Ctx) error {
 	}
 
 	// Count shop_stock rows
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM shop_stock WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
-		blockers["shop_stock"] = cnt
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_items WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["inventory_items"] = cnt
 	}
 
 	// Count stock_movements rows
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM stock_movements WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
-		blockers["stock_movements"] = cnt
+	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM inventory_movements WHERE shop_id = $1", shopID).Scan(&cnt); err == nil && cnt > 0 {
+		blockers["inventory_movements"] = cnt
 	}
 
 	// Count shop_customers

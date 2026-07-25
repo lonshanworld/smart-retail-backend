@@ -31,25 +31,48 @@ func HandleListMerchantStaff(c *fiber.Ctx) error {
 
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("pageSize", "10"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
+	}
 	offset := (page - 1) * pageSize
+	where := " WHERE role = 'staff' AND merchant_id = $1"
+	args := []interface{}{merchantId}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		where += " AND (name ILIKE $2 OR email ILIKE $2)"
+		args = append(args, "%"+search+"%")
+	}
+	if shopID := strings.TrimSpace(c.Query("shopId")); shopID != "" {
+		where += fmt.Sprintf(" AND assigned_shop_id = $%d", len(args)+1)
+		args = append(args, shopID)
+	}
+	if active := c.Query("isActive"); active != "" {
+		if value, parseErr := strconv.ParseBool(active); parseErr == nil {
+			where += fmt.Sprintf(" AND is_active = $%d", len(args)+1)
+			args = append(args, value)
+		}
+	}
 
 	// Get total count
 	var totalCount int
-	countQuery := "SELECT COUNT(*) FROM users WHERE role = 'staff' AND merchant_id = $1"
-	if err = db.QueryRow(ctx, countQuery, merchantId).Scan(&totalCount); err != nil {
+	countQuery := "SELECT COUNT(*) FROM users" + where
+	if err = db.QueryRow(ctx, countQuery, args...).Scan(&totalCount); err != nil {
 		log.Printf("Error counting merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
 	}
 
 	// Get paginated staff
-	query := `
+	query := fmt.Sprintf(`
 		SELECT u.id, u.name, u.email, u.role, u.is_active, u.merchant_id, u.assigned_shop_id, u.created_at, u.updated_at
 		FROM users u
-		WHERE u.role = 'staff' AND u.merchant_id = $1
-		ORDER BY u.created_at DESC
-		LIMIT $2 OFFSET $3
-	`
-	rows, err := db.Query(ctx, query, merchantId, pageSize, offset)
+		%s
+		ORDER BY u.created_at DESC, u.id DESC
+		LIMIT $%d OFFSET $%d
+	`, strings.Replace(where, "role", "u.role", 1), len(args)+1, len(args)+2)
+	args = append(args, pageSize, offset)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		log.Printf("Error listing merchant staff: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -109,6 +132,9 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.ClientOperationID) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "clientOperationId is required"})
 	}
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 255 || strings.TrimSpace(req.Email) == "" || len(req.Email) > 255 || len(req.Password) < 8 || len(req.Password) > 128 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Valid name, email, and password are required"})
+	}
 
 	log.Printf("Parsed request: name=%s, email=%s, assignedShopId=%v", req.Name, req.Email, req.AssignedShopID)
 	if req.AssignedShopID != nil {
@@ -159,6 +185,15 @@ func HandleCreateMerchantStaff(c *fiber.Ctx) error {
 	}
 	if !claimed {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "success", "message": "Operation already processed"})
+	}
+	if assignedShopID != nil {
+		var shopOwned bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shops WHERE id=$1 AND merchant_id=$2)`, assignedShopID, merchantId).Scan(&shopOwned); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to verify assigned shop"})
+		}
+		if !shopOwned {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Assigned shop does not belong to this merchant"})
+		}
 	}
 	err = tx.QueryRow(ctx, query, req.Name, req.Email, string(hashedPassword), merchantId, assignedShopID).Scan(
 		&newStaff.ID, &newStaff.Name, &newStaff.Email, &newStaff.Role, &newStaff.IsActive, &newStaff.MerchantID, &newStaff.AssignedShopID, &newStaff.CreatedAt, &newStaff.UpdatedAt,
@@ -232,6 +267,9 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 		paramIndex++
 	}
 	if req.Password != nil {
+		if len(*req.Password) < 8 || len(*req.Password) > 128 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Password must be between 8 and 128 characters"})
+		}
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
@@ -246,6 +284,15 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 		paramIndex++
 	}
 	if req.AssignedShopID != nil {
+		if *req.AssignedShopID != "" {
+			var shopOwned bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shops WHERE id=$1 AND merchant_id=$2)`, *req.AssignedShopID, merchantId).Scan(&shopOwned); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to verify assigned shop"})
+			}
+			if !shopOwned {
+				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"status": "error", "message": "Assigned shop does not belong to this merchant"})
+			}
+		}
 		setClauses = append(setClauses, fmt.Sprintf("assigned_shop_id = $%d", paramIndex))
 		args = append(args, *req.AssignedShopID)
 		paramIndex++
@@ -265,6 +312,9 @@ func HandleUpdateMerchantStaff(c *fiber.Ctx) error {
 		&updatedStaff.ID, &updatedStaff.Name, &updatedStaff.Email, &updatedStaff.Role, &updatedStaff.IsActive, &updatedStaff.MerchantID, &updatedStaff.AssignedShopID, &updatedStaff.CreatedAt, &updatedStaff.UpdatedAt,
 	); err != nil {
 		log.Printf("Error updating merchant staff: %v", err)
+		if err == pgx.ErrNoRows {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Staff member not found"})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update staff member."})
 	}
 
@@ -349,10 +399,9 @@ func HandleCheckDeleteMerchantStaff(c *fiber.Ctx) error {
 	blockers := map[string]int{}
 	var cnt int
 
-	// Check stock_movements by this user
-	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM stock_movements WHERE user_id = $1", staffId).Scan(&cnt); err == nil && cnt > 0 {
-		blockers["stock_movements"] = cnt
-	}
+	// Inventory movement history is retained independently of the actor, so it
+	// is not a staff-delete blocker. The staff row can be deactivated while
+	// historical movements remain auditable.
 
 	// Check sales recorded by this staff
 	if err := db.QueryRow(ctx, "SELECT COUNT(*) FROM sales WHERE staff_id = $1", staffId).Scan(&cnt); err == nil && cnt > 0 {

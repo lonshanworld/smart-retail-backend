@@ -5,19 +5,22 @@ import (
 	"app/middleware"
 
 	"github.com/gofiber/fiber/v2"
+	"time"
 )
 
 // SetupRoutes defines all the routes for the application.
 func SetupRoutes(app *fiber.App) {
 	api := app.Group("/api/v1")
+	api.Get("/health", handlers.HandleHealth)
 
 	// --- System Initialization ---
 	api.Post("/init/admin", handlers.HandleInitializeAdmin)
 
 	// --- Authentication Routes ---
-	auth := api.Group("/auth")
+	auth := api.Group("/auth", middleware.RateLimit(30, time.Minute))
 	auth.Post("/login", handlers.HandleLogin)
 	auth.Post("/shop-login", handlers.HandleShopLogin)
+	auth.Post("/refresh", handlers.HandleRefresh)
 	// Public merchant signup (no JWT required)
 	auth.Post("/signup", handlers.HandleMerchantSignup)
 
@@ -26,7 +29,7 @@ func SetupRoutes(app *fiber.App) {
 
 	// Admin Profile
 	admin.Get("/profile", handlers.HandleGetAdminProfile)
-	admin.Put("profile", handlers.HandleUpdateAdminProfile)
+	admin.Put("/profile", handlers.HandleUpdateAdminProfile)
 
 	// Dashboard
 	admin.Get("/dashboard/summary", handlers.HandleGetAdminDashboardSummary)
@@ -146,6 +149,9 @@ func SetupRoutes(app *fiber.App) {
 	pos := merchant.Group("/pos")
 	pos.Get("/products", handlers.HandleSearchProductsForPOS)
 	pos.Get("/promotions", handlers.HandleGetActivePromotionsForPOS)
+	pos.Get("/sessions", handlers.HandleListPOSSessions)
+	pos.Post("/sessions", handlers.HandleOpenPOSSession)
+	pos.Post("/sessions/:sessionId/close", handlers.HandleClosePOSSession)
 	pos.Post("/checkout", handlers.HandleCheckout)
 	pos.Post("/sync", handlers.HandleSyncOfflineSales)
 
@@ -154,6 +160,14 @@ func SetupRoutes(app *fiber.App) {
 	customers.Post("/", handlers.HandleCreateCustomer)
 
 	suppliers := merchant.Group("/suppliers")
+	procurement := merchant.Group("/purchasing")
+	procurement.Get("/orders", handlers.HandleListPurchaseOrders)
+	procurement.Post("/orders", handlers.HandleCreatePurchaseOrder)
+	procurement.Post("/orders/:orderId/receive", handlers.HandleReceivePurchaseOrder)
+	accounting := merchant.Group("/accounting")
+	accounting.Get("/accounts", handlers.HandleListAccounts)
+	accounting.Post("/accounts", handlers.HandleCreateAccount)
+	accounting.Post("/journal-entries", handlers.HandleCreateJournalEntry)
 	suppliers.Get("/", handlers.HandleListMerchantSuppliers)
 	suppliers.Post("/", handlers.HandleCreateNewSupplier)
 	suppliers.Get("/:supplierId", handlers.HandleGetSupplierDetails)
@@ -262,6 +276,6 @@ func SetupRoutes(app *fiber.App) {
 	shopPOS.Post("/:shopId/checkout", handlers.HandleShopCheckout)
 
 	// --- Gemini Routes ---
-	gemini := api.Group("/gemini", middleware.JWTMiddleware)
+	gemini := api.Group("/gemini", middleware.JWTMiddleware, middleware.MerchantRequired, middleware.RateLimit(20, time.Minute))
 	gemini.Post("/generate", handlers.HandleGenerateText)
 }

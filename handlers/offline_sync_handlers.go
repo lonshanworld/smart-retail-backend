@@ -47,6 +47,8 @@ type OfflineSaleItem struct {
 	DiscountAmount      *float64 `json:"discountAmount"`
 }
 
+func ptrString(value string) *string { return &value }
+
 // SyncResult represents the result of syncing a single sale
 type SyncResult struct {
 	LocalID         string     `json:"localId"`
@@ -126,13 +128,23 @@ func HandleSyncOfflineSales(c *fiber.Ctx) error {
 		log.Printf("📝 [SYNC] Processing sale: %s, Shop: %s, Amount: %.2f",
 			offlineSale.ID, offlineSale.ShopID, offlineSale.TotalAmount)
 
+		if _, err := tx.Exec(ctx, "SAVEPOINT offline_sale_sync"); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to prepare sale sync", "results": results})
+		}
 		result := processSaleSync(ctx, tx, merchantID, offlineSale)
 		results = append(results, result)
 
 		if result.Status == "synced" {
+			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT offline_sale_sync"); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to finalize sale sync", "results": results})
+			}
 			successCount++
 			log.Printf("✅ [SYNC] Sale %s synced successfully as %s", offlineSale.ID, *result.ServerID)
 		} else {
+			if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT offline_sale_sync"); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to roll back failed sale sync", "results": results})
+			}
+			_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT offline_sale_sync")
 			failureCount++
 			errorMsg := ""
 			if result.Error != nil {
@@ -239,13 +251,46 @@ func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offl
 		log.Printf("❌ [SYNC ITEM] Duplicate check failed: %v", err)
 		return result
 	}
+	if offlineSale.ShopID == "" || len(offlineSale.Items) == 0 || len(offlineSale.Items) > 100 || offlineSale.TotalAmount < 0 {
+		errMsg := "Invalid offline sale payload"
+		result.Error = &errMsg
+		return result
+	}
+	seenProducts := make(map[string]struct{}, len(offlineSale.Items))
+	var calculatedTotal float64
+	for _, item := range offlineSale.Items {
+		if item.ProductID == "" || item.Quantity <= 0 || item.SellingPriceAtSale < 0 {
+			errMsg := "Invalid offline sale item"
+			result.Error = &errMsg
+			return result
+		}
+		if _, exists := seenProducts[item.ProductID]; exists {
+			errMsg := "Duplicate product lines are not allowed in an offline sale"
+			result.Error = &errMsg
+			return result
+		}
+		seenProducts[item.ProductID] = struct{}{}
+		calculatedTotal += float64(item.Quantity) * item.SellingPriceAtSale
+	}
+	if calculatedTotal < offlineSale.TotalAmount-0.01 || calculatedTotal > offlineSale.TotalAmount+0.01 {
+		errMsg := "Offline sale total does not match its items"
+		result.Error = &errMsg
+		return result
+	}
 
 	// Validate items exist and get prices
 	itemPrices := make(map[string]float64)
+	itemInventoryIDs := make(map[string]string)
+	itemProductIDs := make(map[string]string)
+	itemStockItemIDs := make(map[string]string)
+	itemNames := make(map[string]string)
+	itemSKUs := make(map[string]*string)
 	for _, item := range offlineSale.Items {
 		var currentPrice float64
-		priceQuery := "SELECT selling_price FROM inventory_items WHERE id = $1 AND merchant_id = $2"
-		if err := tx.QueryRow(ctx, priceQuery, item.ProductID, merchantID).Scan(&currentPrice); err != nil {
+		var inventoryID, productID, stockItemID, itemName string
+		var itemSKU *string
+		priceQuery := `SELECT ii.id,si.product_id,si.id,si.name,si.sku,COALESCE(pp.selling_price,0) FROM inventory_items ii JOIN stock_items si ON si.id=ii.stock_item_id LEFT JOIN LATERAL(SELECT selling_price FROM product_prices WHERE product_id=si.product_id AND shop_id IS NULL AND price_type='RETAIL' ORDER BY created_at DESC LIMIT 1)pp ON TRUE WHERE ii.shop_id=$1 AND (ii.stock_item_id=$2 OR ii.product_id=$2) AND ii.merchant_id=$3 AND ii.quantity_on_hand >= $4 FOR UPDATE OF ii,si`
+		if err := tx.QueryRow(ctx, priceQuery, offlineSale.ShopID, item.ProductID, merchantID, item.Quantity).Scan(&inventoryID, &productID, &stockItemID, &itemName, &itemSKU, &currentPrice); err != nil {
 			if isNoRows(err) {
 				errMsg := fmt.Sprintf("Item not found or unavailable: %s", item.ProductID)
 				result.Error = &errMsg
@@ -258,6 +303,11 @@ func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offl
 			return result
 		}
 		itemPrices[item.ProductID] = currentPrice
+		itemInventoryIDs[item.ProductID] = inventoryID
+		itemProductIDs[item.ProductID] = productID
+		itemStockItemIDs[item.ProductID] = stockItemID
+		itemNames[item.ProductID] = itemName
+		itemSKUs[item.ProductID] = itemSKU
 	}
 
 	// Create sale
@@ -290,14 +340,14 @@ func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offl
 	for _, item := range offlineSale.Items {
 		itemID := generateUUID()
 		createItemQuery := `
-			INSERT INTO sale_items (id, sale_id, inventory_item_id, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO sale_items (id, sale_id, inventory_item_id, product_id, stock_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`
 
 		subtotal := float64(item.Quantity) * item.SellingPriceAtSale
 
 		if _, err := tx.Exec(ctx, createItemQuery,
-			itemID, saleID, item.ProductID, item.Quantity,
+			itemID, saleID, itemInventoryIDs[item.ProductID], itemProductIDs[item.ProductID], itemStockItemIDs[item.ProductID], itemNames[item.ProductID], itemSKUs[item.ProductID], item.Quantity,
 			item.SellingPriceAtSale, item.OriginalPriceAtSale, subtotal, now, now,
 		); err != nil {
 			errMsg := fmt.Sprintf("Failed to create sale item: %v", err)
@@ -309,19 +359,24 @@ func processSaleSyncWithDB(ctx context.Context, tx DBTx, merchantID string, offl
 
 	// Update inventory (deduct quantities)
 	for _, item := range offlineSale.Items {
-		updateStockQuery := `
-			UPDATE inventory_items
-			SET quantity_available = quantity_available - $1,
-			    updated_at = $2
-			WHERE id = $3 AND merchant_id = $4
-		`
+		updateStockQuery := `UPDATE inventory_items SET quantity_on_hand=quantity_on_hand-$1,updated_at=$2 WHERE id=$3 AND merchant_id=$4 AND quantity_on_hand >= $1`
 
-		if _, err := tx.Exec(ctx, updateStockQuery,
-			item.Quantity, now, item.ProductID, merchantID,
-		); err != nil {
+		updateResult, err := tx.Exec(ctx, updateStockQuery,
+			item.Quantity, now, itemInventoryIDs[item.ProductID], merchantID,
+		)
+		if err != nil {
 			errMsg := fmt.Sprintf("Failed to update inventory: %v", err)
 			result.Error = &errMsg
 			log.Printf("❌ [SYNC ITEM] Inventory update failed: %v", err)
+			return result
+		}
+		if updateResult != 1 {
+			errMsg := fmt.Sprintf("Insufficient stock for item: %s", item.ProductID)
+			result.Error = &errMsg
+			return result
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO inventory_movements(merchant_id,shop_id,inventory_item_id,product_id,stock_item_id,movement_type,quantity,base_quantity,reference_type,reference_id,event_key,notes) VALUES($1,$2,$3,$4,$5,'OUT',$6,$6,'OFFLINE_SALE',$7,$8,'Offline sale sync')`, merchantID, offlineSale.ShopID, itemInventoryIDs[item.ProductID], itemProductIDs[item.ProductID], itemStockItemIDs[item.ProductID], item.Quantity, saleID, fmt.Sprintf("%s:%s", offlineSale.ID, item.ProductID)); err != nil {
+			result.Error = ptrString(fmt.Sprintf("Failed to record inventory movement: %v", err))
 			return result
 		}
 	}
@@ -349,7 +404,7 @@ func isNoRows(err error) bool {
 // logSyncOperation logs the sync operation for audit trail
 func logSyncOperation(ctx context.Context, db *pgxpool.Pool, merchantID, deviceID string, total, success, failed int) error {
 	query := `
-		INSERT INTO sync_logs (id, merchant_id, device_id, total_sales, successful_syncs, failed_syncs, timestamp)
+		INSERT INTO sync_logs (id, merchant_id, device_id, total_sales, successful_syncs, failed_syncs, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 

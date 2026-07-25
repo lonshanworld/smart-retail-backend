@@ -5,11 +5,11 @@ import (
 	"app/middleware"
 	"app/models"
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -29,7 +29,7 @@ func HandleGetMerchantProfile(c *fiber.Ctx) error {
 
 	err = db.QueryRow(ctx, query, userId).Scan(&userProfile.ID, &userProfile.Name, &userProfile.Email, &userProfile.Phone, &userProfile.Role, &userProfile.CreatedAt, &userProfile.UpdatedAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -89,6 +89,9 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 	}
 
 	if req.Password != "" {
+		if len(req.Password) < 8 || len(req.Password) > 128 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"status": "error", "message": "Password must be between 8 and 128 characters"})
+		}
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to hash password"})
@@ -103,7 +106,7 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 		var current models.User
 		selectQuery := "SELECT id, name, email, phone, role, created_at, updated_at FROM users WHERE id = $1 AND role = 'merchant'"
 		if err := tx.QueryRow(ctx, selectQuery, userId).Scan(&current.ID, &current.Name, &current.Email, &current.Phone, &current.Role, &current.CreatedAt, &current.UpdatedAt); err != nil {
-			if err == sql.ErrNoRows {
+			if err == pgx.ErrNoRows {
 				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
 			}
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Database error"})
@@ -120,7 +123,7 @@ func HandleUpdateMerchantProfile(c *fiber.Ctx) error {
 
 	var updatedUser models.User
 	if err := tx.QueryRow(ctx, queryUpdate, args...).Scan(&updatedUser.ID, &updatedUser.Name, &updatedUser.Email, &updatedUser.Phone, &updatedUser.Role, &updatedUser.CreatedAt, &updatedUser.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
+		if err == pgx.ErrNoRows {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"status": "error", "message": "Merchant not found"})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to update profile"})

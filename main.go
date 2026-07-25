@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/joho/godotenv"
 )
 
@@ -45,10 +46,18 @@ func main() {
 	}
 	defer database.CloseDB()
 
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		BodyLimit:             10 * 1024 * 1024,
+		DisableStartupMessage: false,
+	})
+	app.Use(recover.New())
 
-	// Add CORS middleware
-	app.Use(cors.New())
+	// Restrict browser origins when configured; never use wildcard origins with credentials.
+	corsOrigins := os.Getenv("CORS_ORIGINS")
+	if corsOrigins == "" {
+		corsOrigins = "http://localhost:3000,http://localhost:8080,http://localhost:5000"
+	}
+	app.Use(cors.New(cors.Config{AllowOrigins: corsOrigins, AllowHeaders: "Origin, Content-Type, Accept, Authorization, X-Client-Operation-Id", AllowMethods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS"}))
 
 	// Setup routes
 	routes.SetupRoutes(app)

@@ -116,9 +116,21 @@ func HandleGetSalaryHistory(c *fiber.Ctx) error {
 		return err
 	}
 	userID := claims.UserID
+	page := c.QueryInt("page", 1)
+	pageSize := c.QueryInt("pageSize", 20)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
 
-	query := `SELECT id, staff_id, amount_paid, payment_date, notes FROM salary_payments WHERE staff_id = $1 ORDER BY payment_date DESC`
-	rows, err := db.Query(ctx, query, userID)
+	var total int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM salary_payments WHERE staff_id=$1`, userID).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"status": "error", "message": "Failed to count salary history"})
+	}
+	query := `SELECT id, staff_id, amount_paid, payment_date, notes FROM salary_payments WHERE staff_id = $1 ORDER BY payment_date DESC LIMIT $2 OFFSET $3`
+	rows, err := db.Query(ctx, query, userID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		log.Printf("Error querying salary history for staff %s: %v", userID, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to retrieve salary history"})
@@ -140,5 +152,5 @@ func HandleGetSalaryHistory(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"status": "error", "message": "Failed to process salary history"})
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": salaries})
+	return c.JSON(fiber.Map{"status": "success", "data": salaries, "pagination": fiber.Map{"totalItems": total, "totalPages": (total + pageSize - 1) / pageSize, "currentPage": page, "pageSize": pageSize}})
 }

@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -20,6 +23,9 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		log.Printf("❌ [AI ASSISTANT] Failed to parse request body: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid request"})
+	}
+	if strings.TrimSpace(req.Prompt) == "" || len(req.Prompt) > 1000 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Prompt must contain between 1 and 1000 characters"})
 	}
 
 	claims, err := middleware.ExtractClaims(c)
@@ -33,20 +39,20 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 	log.Printf("🤖 [AI ASSISTANT] Starting request")
 	log.Printf("   Merchant ID: %s", merchantID)
 	log.Printf("   Provider: %s", provider)
-	log.Printf("   User Prompt: %s", req.Prompt)
+	log.Printf("   User prompt accepted (%d characters)", len(req.Prompt))
 
 	// 1. Use AI to generate SQL query from natural language
 	log.Printf("🔄 [AI ASSISTANT] Step 1: Generating SQL from prompt...")
 	sqlQuery, err := generateSQLFromPrompt(req.Prompt, merchantID, provider)
 	if err != nil {
 		log.Printf("❌ [AI ASSISTANT] Failed to generate SQL: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "message": "AI provider is currently unavailable"})
 	}
-	log.Printf("✅ [AI ASSISTANT] Generated SQL: %s", sqlQuery)
+	log.Printf("✅ [AI ASSISTANT] Generated SQL accepted for validation")
 
 	// 2. Validate the SQL query (security check)
 	log.Printf("🔄 [AI ASSISTANT] Step 2: Validating SQL query...")
-	if err := validateSQLQuery(sqlQuery); err != nil {
+	if err := validateSQLQuery(sqlQuery, merchantID); err != nil {
 		log.Printf("❌ [AI ASSISTANT] SQL validation failed: %v", err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Invalid query: %s", err.Error())})
 	}
@@ -57,7 +63,7 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 	queryResult, err := executeSafeQuery(sqlQuery)
 	if err != nil {
 		log.Printf("❌ [AI ASSISTANT] Query execution failed: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Query execution failed: %s", err.Error())})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "Query execution failed"})
 	}
 	log.Printf("✅ [AI ASSISTANT] Query executed successfully, returned %d rows", len(queryResult))
 
@@ -66,12 +72,12 @@ func HandleAIAssistant(c *fiber.Ctx) error {
 	analysisHTML, err := formatResultsWithAI(req.Prompt, queryResult, provider)
 	if err != nil {
 		log.Printf("❌ [AI ASSISTANT] Failed to format results: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "message": "AI provider is currently unavailable"})
 	}
 	log.Printf("✅ [AI ASSISTANT] Analysis generated successfully")
 
 	log.Printf("🎉 [AI ASSISTANT] Request completed successfully")
-	return c.JSON(fiber.Map{"success": true, "analysis": stripHTMLTags(analysisHTML), "analysis_html": analysisHTML, "analysis_format": "html", "provider": string(provider), "sql": sqlQuery, "data": queryResult})
+	return c.JSON(fiber.Map{"success": true, "analysis": stripHTMLTags(analysisHTML), "analysis_html": escapeAIHTML(analysisHTML), "analysis_format": "html", "provider": string(provider), "sql": sqlQuery, "data": queryResult})
 }
 
 // generateSQLFromPrompt uses Gemini to convert natural language to SQL
@@ -106,26 +112,39 @@ func generateSQLFromPrompt(prompt string, merchantID string, provider aiProvider
 	// Database schema information (from actual schema.sql)
 	schemaInfo := `
 Database Schema:
-- users (id, name, email, password_hash, phone, role, is_active, merchant_id, assigned_shop_id, created_at, updated_at)
-- shops (id, name, merchant_id, address, phone, is_active, is_primary, created_at, updated_at)
-- staff_contracts (id, staff_id, salary, pay_frequency, start_date, end_date, is_active, created_at, updated_at)
+- users (id, name, email, role, merchant_id, assigned_shop_id, is_active, created_at, updated_at)
+- shops (id, merchant_id, name, address, phone, is_active, is_primary, created_at, updated_at)
+- products (id, merchant_id, name, slug, product_type, brand_id, is_active, created_at, updated_at)
+- product_variants (id, merchant_id, product_id, name, sku, barcode, attributes, is_active)
+- product_categories (merchant_id, product_id, category_id)
+- product_prices (id, merchant_id, product_id, variant_id, shop_id, price_type, cost_price, selling_price, starts_at, ends_at)
+- stock_items (id, merchant_id, product_id, variant_id, name, sku, tracking_mode, base_unit_id, is_active)
+- inventory_items (id, merchant_id, shop_id, product_id, stock_item_id, variant_id, quantity_on_hand, reserved_quantity, low_stock_threshold, is_active)
+- inventory_batches (id, merchant_id, shop_id, inventory_item_id, product_id, stock_item_id, batch_code, quantity_received, quantity_remaining, expiry_date)
+- inventory_movements (id, merchant_id, shop_id, inventory_item_id, product_id, stock_item_id, movement_type, quantity, base_quantity, unit_cost, reference_type, reference_id, movement_date)
+- inventory_reservations (id, merchant_id, shop_id, inventory_item_id, quantity, status)
+- barcode_registry (id, merchant_id, code, normalized_code, owner_type, owner_id, is_active)
 - suppliers (id, merchant_id, name, contact_name, contact_email, contact_phone, address, notes, created_at, updated_at)
-- inventory_items (id, merchant_id, name, description, sku, selling_price, original_price, low_stock_threshold, category, supplier_id, is_archived, created_at, updated_at)
-- shop_stock (id, shop_id, inventory_item_id, quantity, last_stocked_in_at)
-- stock_movements (id, inventory_item_id, shop_id, user_id, movement_type, quantity_changed, new_quantity, reason, movement_date, notes)
+- promotions (id, merchant_id, shop_id, name, description, promo_type, promo_value, min_spend, start_date, end_date, is_active)
+- promotion_products (merchant_id, promotion_id, product_id)
 - shop_customers (id, shop_id, merchant_id, name, email, phone, created_at, updated_at)
-- promotions (id, merchant_id, shop_id, name, description, promo_type, promo_value, min_spend, start_date, end_date, is_active, created_at, updated_at)
-- promotion_products (promotion_id, inventory_item_id)
-- sales (id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, stripe_payment_intent_id, notes, created_at, updated_at)
-- sale_items (id, sale_id, inventory_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal, created_at, updated_at)
-- salary_payments (id, staff_id, payment_date, amount_paid, payment_period_start, payment_period_end, payment_method, notes, created_at)
-- notifications (id, recipient_user_id, title, message, notification_type, related_entity_type, related_entity_id, is_read, created_at)
+- sales (id, shop_id, merchant_id, staff_id, customer_id, sale_date, total_amount, applied_promotion_id, discount_amount, payment_type, payment_status, notes, created_at, updated_at)
+- sale_items (id, sale_id, inventory_item_id, product_id, variant_id, stock_item_id, item_name, item_sku, quantity_sold, selling_price_at_sale, original_price_at_sale, subtotal)
+- invoices (id, merchant_id, shop_id, sale_id, invoice_number, payment_status, total_amount, invoice_date)
+- payments (id, sale_id, method, amount, status, reference, created_at)
+- purchase_orders (id, merchant_id, shop_id, supplier_id, status, total_amount, ordered_at)
+- purchase_order_items (id, purchase_order_id, stock_item_id, quantity, unit_cost)
+- goods_receipts (id, merchant_id, shop_id, purchase_order_id, supplier_id, status, received_at)
+- goods_receipt_items (id, goods_receipt_id, stock_item_id, quantity_received, unit_cost)
+- accounts (id, merchant_id, shop_id, code, name, account_type, is_active)
+- journal_entries (id, merchant_id, shop_id, entry_date, reference_type, reference_id, description)
+- journal_lines (id, journal_entry_id, account_id, debit, credit)
 
 CRITICAL - Table naming (use EXACT names from schema):
-- Use "shop_stock" (SINGULAR), NOT "shop_stocks"
-- Use "shop_customers" (plural), NOT "customers"
-- Use "inventory_items" (plural), NOT "inventory"
-- Use "sale_items" (plural), NOT "sale_item"
+- Use "inventory_items" for shop-level stock balances
+- Use "inventory_movements" for stock adjustments and stock history
+- Use "shop_customers" for customer records
+- Use "sale_items" for sale line items
 
 Important:
 - The merchant_id for this query is: '` + merchantID + `'
@@ -145,7 +164,7 @@ Return ONLY the SQL query without any explanation, code blocks, or markdown.
 The query MUST include WHERE merchant_id = '%s' for security.`, schemaInfo, prompt, merchantID)
 
 	log.Printf("   🔍 [SQL GEN] Sending prompt to Gemini AI...")
-	log.Printf("   📝 [SQL GEN] User question: %s", prompt)
+	log.Printf("   📝 [SQL GEN] User question accepted (%d characters)", len(prompt))
 	sqlQuery, err := generateAIText(ctx, provider, "You are a PostgreSQL expert. Return only one safe SELECT query.", sqlPrompt)
 	if err != nil {
 		log.Printf("   ❌ [SQL GEN] AI provider error: %v", err)
@@ -153,7 +172,7 @@ The query MUST include WHERE merchant_id = '%s' for security.`, schemaInfo, prom
 	}
 
 	sqlQuery = strings.TrimSpace(sqlQuery)
-	log.Printf("   📋 [SQL GEN] Raw AI response: %s", sqlQuery)
+	log.Printf("   📋 [SQL GEN] AI response received (%d characters)", len(sqlQuery))
 
 	// Clean up the SQL (remove markdown code blocks if present)
 	sqlQuery = strings.TrimPrefix(sqlQuery, "```sql")
@@ -166,49 +185,62 @@ The query MUST include WHERE merchant_id = '%s' for security.`, schemaInfo, prom
 }
 
 // validateSQLQuery ensures the query is safe (only SELECT, no dangerous operations)
-func validateSQLQuery(query string) error {
-	log.Printf("   🔍 [SQL VALIDATE] Starting validation...")
-	log.Printf("   📝 [SQL VALIDATE] Query: %s", query)
-
-	queryUpper := strings.ToUpper(strings.TrimSpace(query))
-
-	// Must start with SELECT
-	if !strings.HasPrefix(queryUpper, "SELECT") {
-		log.Printf("   ❌ [SQL VALIDATE] Query does not start with SELECT")
-		return fmt.Errorf("only SELECT queries are allowed")
+func validateSQLQuery(query string, merchantID string) error {
+	query = strings.TrimSpace(query)
+	// A single trailing semicolon is a normal SQL statement terminator. Strip
+	// it before checking for embedded semicolons, which would indicate more
+	// than one statement.
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	if query == "" || len(query) > 4000 {
+		return fmt.Errorf("query is empty or too large")
 	}
-	log.Printf("   ✅ [SQL VALIDATE] Query starts with SELECT")
-
-	// Forbidden keywords
-	forbiddenKeywords := []string{
-		"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
-		"CREATE", "REPLACE", "GRANT", "REVOKE", "EXEC", "EXECUTE",
-		"--", "/*", "*/", ";--", "UNION", "INTO OUTFILE", "INTO DUMPFILE",
+	if !regexp.MustCompile(`(?i)^SELECT\b`).MatchString(query) ||
+		strings.Contains(query, ";") || strings.Contains(query, "\x00") ||
+		strings.Contains(query, "--") || strings.Contains(query, "/*") || strings.Contains(query, "*/") ||
+		regexp.MustCompile(`(?is)\bWITH\b|\(\s*SELECT\b`).MatchString(query) {
+		return fmt.Errorf("only one plain SELECT query is allowed")
 	}
 
-	for _, keyword := range forbiddenKeywords {
-		if strings.Contains(queryUpper, keyword) {
-			log.Printf("   ❌ [SQL VALIDATE] Forbidden keyword detected: %s", keyword)
-			return fmt.Errorf("forbidden keyword detected: %s", keyword)
+	for _, keyword := range []string{
+		"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE",
+		"REPLACE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "UNION", "OR", "PG_SLEEP",
+	} {
+		if regexp.MustCompile(`(?i)\b` + keyword + `\b`).MatchString(query) {
+			return fmt.Errorf("forbidden SQL operation")
 		}
 	}
-	log.Printf("   ✅ [SQL VALIDATE] No forbidden keywords found")
-
-	// Must contain merchant_id filter for security
-	if !strings.Contains(queryUpper, "MERCHANT_ID") {
-		log.Printf("   ❌ [SQL VALIDATE] Query missing merchant_id filter")
-		return fmt.Errorf("query must filter by merchant_id for security")
+	if !regexp.MustCompile(`(?i)\bWHERE\b`).MatchString(query) {
+		return fmt.Errorf("query must include a WHERE clause")
 	}
-	log.Printf("   ✅ [SQL VALIDATE] merchant_id filter present")
-
-	// Must have LIMIT clause
-	if !strings.Contains(queryUpper, "LIMIT") {
-		log.Printf("   ❌ [SQL VALIDATE] Query missing LIMIT clause")
-		return fmt.Errorf("query must include LIMIT clause")
+	merchantFilter := regexp.MustCompile(`(?i)\bmerchant_id\s*=\s*'` + regexp.QuoteMeta(merchantID) + `'`)
+	if !merchantFilter.MatchString(query) {
+		return fmt.Errorf("query must be scoped to the authenticated merchant")
 	}
-	log.Printf("   ✅ [SQL VALIDATE] LIMIT clause present")
-
-	log.Printf("   🎉 [SQL VALIDATE] All validations passed!")
+	limitMatch := regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`).FindStringSubmatch(query)
+	if len(limitMatch) != 2 {
+		return fmt.Errorf("query must include LIMIT between 1 and 100")
+	}
+	limit, limitErr := strconv.Atoi(limitMatch[1])
+	if limitErr != nil || limit < 1 || limit > 100 {
+		return fmt.Errorf("query must include LIMIT between 1 and 100")
+	}
+	allowedTables := map[string]bool{
+		"users": true, "shops": true, "products": true, "product_variants": true,
+		"product_categories": true, "product_prices": true, "stock_items": true,
+		"inventory_items": true, "inventory_batches": true,
+		"inventory_movements": true, "inventory_reservations": true,
+		"barcode_registry": true, "suppliers": true, "promotions": true,
+		"promotion_products": true, "sales": true, "sale_items": true,
+		"shop_customers": true, "invoices": true, "payments": true,
+		"purchase_orders": true, "purchase_order_items": true,
+		"goods_receipts": true, "goods_receipt_items": true, "accounts": true,
+		"journal_entries": true, "journal_lines": true,
+	}
+	for _, table := range regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)`).FindAllStringSubmatch(query, -1) {
+		if len(table) != 2 || !allowedTables[strings.ToLower(table[1])] {
+			return fmt.Errorf("query references a table outside the reporting schema")
+		}
+	}
 	return nil
 }
 
@@ -216,10 +248,22 @@ func validateSQLQuery(query string) error {
 func executeSafeQuery(query string) ([]map[string]interface{}, error) {
 	log.Printf("   🔍 [SQL EXEC] Connecting to database...")
 	db := database.GetDB()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	log.Printf("   🔍 [SQL EXEC] Executing query...")
-	rows, err := db.Query(ctx, query)
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query transaction error: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '5s'`); err != nil {
+		return nil, fmt.Errorf("query timeout configuration error: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `SET LOCAL transaction_read_only = on`); err != nil {
+		return nil, fmt.Errorf("query read-only configuration error: %w", err)
+	}
+	rows, err := tx.Query(ctx, query)
 	if err != nil {
 		log.Printf("   ❌ [SQL EXEC] Query failed: %v", err)
 		return nil, fmt.Errorf("query execution error: %w", err)
@@ -253,10 +297,13 @@ func executeSafeQuery(query string) ([]map[string]interface{}, error) {
 		rowCount++
 	}
 
-	log.Printf("   ✅ [SQL EXEC] Retrieved %d rows", rowCount)
-	if rowCount > 0 {
-		log.Printf("   📋 [SQL EXEC] Sample row 1: %+v", results[0])
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query iteration error: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("query commit error: %w", err)
+	}
+	log.Printf("   ✅ [SQL EXEC] Retrieved %d rows", rowCount)
 	return results, nil
 }
 
