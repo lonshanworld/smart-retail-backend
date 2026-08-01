@@ -144,6 +144,47 @@ type Supplier struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
+type CustomerTag struct {
+	ID         string  `json:"id"`
+	MerchantID string  `json:"merchantId"`
+	Name       string  `json:"name"`
+	Color      *string `json:"color,omitempty"`
+}
+
+type CustomerTagRequest struct {
+	Name  string  `json:"name"`
+	Color *string `json:"color,omitempty"`
+}
+
+type CustomerNote struct {
+	ID         string    `json:"id"`
+	CustomerID string    `json:"customerId"`
+	CreatedBy  *string   `json:"createdBy,omitempty"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+type CustomerNoteRequest struct {
+	Content string `json:"content"`
+}
+
+type CustomerActivity struct {
+	ID           string                 `json:"id"`
+	CustomerID   string                 `json:"customerId"`
+	EventKey     *string                `json:"eventKey,omitempty"`
+	ActivityType string                 `json:"activityType"`
+	Description  *string                `json:"description,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt    time.Time              `json:"createdAt"`
+}
+
+type CustomerActivityRequest struct {
+	EventKey     *string                `json:"eventKey,omitempty"`
+	ActivityType string                 `json:"activityType"`
+	Description  *string                `json:"description,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // InventoryItem represents an item in the master inventory of a merchant.
 type InventoryItem struct {
 	ID                string       `json:"id"`

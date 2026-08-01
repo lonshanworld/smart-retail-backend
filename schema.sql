@@ -27,18 +27,6 @@ CREATE TABLE users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE roles (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(100) NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE user_roles (
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    PRIMARY KEY (user_id, role_id)
-);
-
 CREATE TABLE refresh_tokens (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -83,14 +71,6 @@ CREATE TABLE shops (
 
 ALTER TABLE users ADD CONSTRAINT fk_users_assigned_shop
     FOREIGN KEY (assigned_shop_id) REFERENCES shops(id) ON DELETE SET NULL;
-
-CREATE TABLE shop_staff (
-    shop_id UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-    assigned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (shop_id, user_id)
-);
 
 -- ================================================================
 -- Catalog
@@ -167,23 +147,23 @@ CREATE TABLE product_variants (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (product_id, sku),
-    UNIQUE (merchant_id, id)
+    UNIQUE (merchant_id, id),
+    UNIQUE (merchant_id, product_id, id),
+    UNIQUE (product_id, id)
 );
 
 CREATE TABLE product_images (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     url TEXT NOT NULL,
+    source_type VARCHAR(30) NOT NULL DEFAULT 'URL' CHECK (source_type IN ('URL', 'GOOGLE_PUBLIC', 'CLOUDINARY', 'MINIO')),
+    original_url TEXT,
+    storage_provider VARCHAR(30),
+    storage_public_id VARCHAR(512),
+    storage_object_name VARCHAR(512),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE product_attributes (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    attribute_key VARCHAR(100) NOT NULL,
-    value TEXT NOT NULL,
-    UNIQUE (product_id, attribute_key)
 );
 
 CREATE TABLE product_prices (
@@ -935,20 +915,6 @@ CREATE TABLE support_messages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE testimonials (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    merchant_id UUID REFERENCES users(id) ON DELETE CASCADE,
-    shop_id UUID REFERENCES shops(id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL,
-    role VARCHAR(255),
-    content TEXT NOT NULL,
-    rating SMALLINT NOT NULL DEFAULT 5 CHECK (rating >= 1 AND rating <= 5),
-    avatar TEXT,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE file_objects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     bucket VARCHAR(255) NOT NULL,
@@ -1047,12 +1013,16 @@ ALTER TABLE product_variants ADD CONSTRAINT fk_product_variants_product_same_mer
     FOREIGN KEY (merchant_id, product_id) REFERENCES products (merchant_id, id);
 ALTER TABLE stock_items ADD CONSTRAINT fk_stock_items_variant_same_merchant
     FOREIGN KEY (merchant_id, variant_id) REFERENCES product_variants (merchant_id, id);
+ALTER TABLE stock_items ADD CONSTRAINT fk_stock_items_product_variant_same_product
+    FOREIGN KEY (merchant_id, product_id, variant_id) REFERENCES product_variants (merchant_id, product_id, id);
 ALTER TABLE product_prices ADD CONSTRAINT fk_product_prices_product_same_merchant
     FOREIGN KEY (merchant_id, product_id) REFERENCES products (merchant_id, id);
 ALTER TABLE product_prices ADD CONSTRAINT fk_product_prices_shop_same_merchant
     FOREIGN KEY (merchant_id, shop_id) REFERENCES shops (merchant_id, id);
 ALTER TABLE product_prices ADD CONSTRAINT fk_product_prices_variant_same_merchant
     FOREIGN KEY (merchant_id, variant_id) REFERENCES product_variants (merchant_id, id);
+ALTER TABLE product_prices ADD CONSTRAINT fk_product_prices_product_variant_same_product
+    FOREIGN KEY (merchant_id, product_id, variant_id) REFERENCES product_variants (merchant_id, product_id, id) ON DELETE CASCADE;
 ALTER TABLE inventory_items ADD CONSTRAINT fk_inventory_items_shop_same_merchant
     FOREIGN KEY (merchant_id, shop_id) REFERENCES shops (merchant_id, id);
 ALTER TABLE inventory_items ADD CONSTRAINT fk_inventory_items_product_same_merchant
@@ -1061,6 +1031,8 @@ ALTER TABLE inventory_items ADD CONSTRAINT fk_inventory_items_stock_same_merchan
     FOREIGN KEY (merchant_id, stock_item_id) REFERENCES stock_items (merchant_id, id);
 ALTER TABLE inventory_items ADD CONSTRAINT fk_inventory_items_variant_same_merchant
     FOREIGN KEY (merchant_id, variant_id) REFERENCES product_variants (merchant_id, id);
+ALTER TABLE inventory_items ADD CONSTRAINT fk_inventory_items_product_variant_same_product
+    FOREIGN KEY (merchant_id, product_id, variant_id) REFERENCES product_variants (merchant_id, product_id, id);
 ALTER TABLE shop_customers ADD CONSTRAINT uq_shop_customers_merchant_id UNIQUE (merchant_id, id);
 ALTER TABLE shop_customers ADD CONSTRAINT fk_shop_customers_shop_same_merchant
     FOREIGN KEY (merchant_id, shop_id) REFERENCES shops (merchant_id, id);
@@ -1076,6 +1048,10 @@ ALTER TABLE invoices ADD CONSTRAINT fk_invoices_shop_same_merchant
     FOREIGN KEY (merchant_id, shop_id) REFERENCES shops (merchant_id, id);
 ALTER TABLE invoices ADD CONSTRAINT fk_invoices_customer_same_merchant
     FOREIGN KEY (merchant_id, customer_id) REFERENCES shop_customers (merchant_id, id);
+ALTER TABLE sale_items ADD CONSTRAINT fk_sale_items_product_variant_same_product
+    FOREIGN KEY (product_id, variant_id) REFERENCES product_variants (product_id, id);
+ALTER TABLE product_attribute_assignments ADD CONSTRAINT fk_product_attribute_assignments_product_variant_same_product
+    FOREIGN KEY (product_id, variant_id) REFERENCES product_variants (product_id, id);
 ALTER TABLE suppliers ADD CONSTRAINT uq_suppliers_merchant_id UNIQUE (merchant_id, id);
 ALTER TABLE purchase_orders ADD CONSTRAINT fk_purchase_orders_shop_same_merchant
     FOREIGN KEY (merchant_id, shop_id) REFERENCES shops (merchant_id, id);
@@ -1093,7 +1069,6 @@ CREATE UNIQUE INDEX idx_shops_one_primary_per_merchant
 CREATE INDEX idx_users_merchant ON users (merchant_id);
 CREATE INDEX idx_users_locked_until ON users (locked_until);
 CREATE INDEX idx_sync_logs_merchant_created ON sync_logs (merchant_id, created_at DESC);
-CREATE INDEX idx_user_roles_role ON user_roles (role_id);
 CREATE INDEX idx_refresh_tokens_user_expiry ON refresh_tokens (user_id, expires_at);
 CREATE INDEX idx_audit_entity ON audit_logs (entity_type, entity_id);
 CREATE INDEX idx_shops_merchant_active ON shops (merchant_id, is_active);
